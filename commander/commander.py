@@ -76,15 +76,21 @@ BOTS: dict[str, BotSpec] = {
 
 HELP = (
     "*Bot commander*\n"
-    "`status` — all bots\n"
+    "`status` — all bots + gateway\n"
     "`logs <bot>` — recent log lines\n"
     "`pause|resume|restart <bot>`\n"
     "`dry <bot>` — alerts-only mode\n"
     "`golive <bot> now` — LIVE paper orders\n"
     "`positions` — open IBKR positions\n"
     "`flatten <bot> now` — close its positions\n"
+    "`gateway` — IB Gateway status\n"
+    "`gateway restart now` — force Gateway relogin\n"
     f"bots: {', '.join(BOTS)}"
 )
+
+GATEWAY_LABEL = "com.villerajala.ibcgateway"
+GATEWAY_PLIST = Path.home() / "Library" / "LaunchAgents" / f"{GATEWAY_LABEL}.plist"
+IBC_DIR = Path.home() / "IBC"
 
 
 # ---------- telegram ----------
@@ -215,6 +221,50 @@ def flatten_bot(spec: BotSpec) -> str:
         return f"IB error: {e}"
 
 
+# ---------- gateway ----------
+
+def port_up(port: int = IB_PORT) -> bool:
+    import socket
+    try:
+        with socket.create_connection((IB_HOST, port), timeout=3):
+            return True
+    except Exception:
+        return False
+
+
+def gateway_status() -> str:
+    up = port_up()
+    running, detail = is_running(GATEWAY_LABEL)
+    dot = "🟢" if up else "🔴"
+    last = ""
+    try:
+        lines = (IBC_DIR / "healthcheck.log").read_text().splitlines()
+        if lines:
+            last = f"\nlast healthcheck: {lines[-1][:120]}"
+    except Exception:
+        pass
+    return (f"{dot} *gateway* — API port {IB_PORT} {'UP' if up else 'DOWN'}; "
+            f"launchd {detail}{last}")
+
+
+def gateway_restart() -> str:
+    """Force a full Gateway recycle: unload agent, kill leftovers, reload, wait."""
+    _run(["launchctl", "unload", str(GATEWAY_PLIST)])
+    for pat in ("IbcGateway", "ibcstart", "start_gateway_paper"):
+        subprocess.run(["pkill", "-f", pat], capture_output=True)
+    time.sleep(8)
+    rc, out = _run(["launchctl", "load", str(GATEWAY_PLIST)])
+    if rc != 0:
+        return f"⚠️ reload failed: {out[:150]}"
+    send("♻️ Gateway recycling — waiting for login (up to 5 min)…")
+    for i in range(30):
+        time.sleep(10)
+        if port_up():
+            return f"🟢 Gateway recovered after ~{(i + 1) * 10}s. Bots will reconnect."
+    return ("🔴 Gateway did not come back in 5 min — likely needs manual login "
+            "(2FA?). Check the Mac when possible.")
+
+
 # ---------- command dispatch ----------
 
 def status_text() -> str:
@@ -236,9 +286,15 @@ def handle(text: str) -> str:
     if cmd in ("help", "/help", "/start"):
         return HELP
     if cmd == "status":
-        return status_text()
+        return status_text() + "\n" + gateway_status()
     if cmd == "positions":
         return positions_text()
+    if cmd == "gateway":
+        if args and args[0] == "restart":
+            if "now" not in args:
+                return "⚠️ This drops all bot connections for ~1-3 min. Confirm: `gateway restart now`"
+            return gateway_restart()
+        return gateway_status()
 
     if cmd in ("logs", "pause", "resume", "restart", "dry", "golive", "flatten"):
         if not args or args[0] not in BOTS:
