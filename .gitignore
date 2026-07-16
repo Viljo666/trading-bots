@@ -1,0 +1,37 @@
+# --- secrets: NEVER commit ---
+.env
+*.pem
+*.key
+
+# --- python ---
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# --- runtime state & logs (machine-local, regenerated) ---
+logs/
+journal/
+*.log
+*.jsonl
+*.lock
+.offset
+state.json
+status.json
+.gateway_alert_sent
+nohup.out
+
+# --- data caches (large, regenerable via fetchers) ---
+data/
+*.csv
+*.parquet
+
+# --- separate repos (stock_screener has its own git + GH Actions deploy) ---
+stock_screener/
+
+# --- os / editor ---
+.DS_Store
+.idea/
+.vscode/
+.claude/
