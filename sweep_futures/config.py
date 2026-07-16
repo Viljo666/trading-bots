@@ -32,14 +32,15 @@ class SymbolSpec:
     exchange: str
     dollars_per_point: float
     tick_size: float
-    # Use micro contracts for a small paper account so 1% risk ≈ 1 contract.
-    # Full-size: NQ ($20/pt), CL ($1000/pt). Micros: MNQ ($2/pt), MCL ($100/pt).
 
 
-# The validated basket. NQ best index proxy; CL the only diversifier (~0 corr).
+# The validated basket (NQ best index proxy; CL the only diversifier, ~0 corr),
+# traded via MICRO contracts (MNQ $2/pt, MCL $100/pt) so 1%-of-equity risk
+# sizing is honest on a small account. Signals are identical: micros track the
+# full-size price series tick-for-tick.
 SYMBOLS: list[SymbolSpec] = [
-    SymbolSpec("NQ", "CME", dollars_per_point=20.0, tick_size=0.25),
-    SymbolSpec("CL", "NYMEX", dollars_per_point=1000.0, tick_size=0.01),
+    SymbolSpec("MNQ", "CME", dollars_per_point=2.0, tick_size=0.25),
+    SymbolSpec("MCL", "NYMEX", dollars_per_point=100.0, tick_size=0.01),
 ]
 
 

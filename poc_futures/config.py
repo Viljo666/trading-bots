@@ -40,10 +40,13 @@ class SymbolSpec:
     bin_pts: float               # volume-profile bin size (matches backtest)
 
 
-# Validated basket: YM + ES. NQ tested negative — do not add without re-validation.
+# Validated basket: YM + ES (NQ tested negative — do not add without
+# re-validation), traded via MICRO contracts (MYM $0.50/pt, MES $5/pt) for
+# honest 1%-risk sizing. POC/ATR are computed from the micro's own bars; micro
+# volume tracks full-size closely enough that the POC lands on the same level.
 SYMBOLS: list[SymbolSpec] = [
-    SymbolSpec("YM", "CBOT", dollars_per_point=5.0, tick_size=1.0, bin_pts=10.0),
-    SymbolSpec("ES", "CME", dollars_per_point=50.0, tick_size=0.25, bin_pts=1.0),
+    SymbolSpec("MYM", "CBOT", dollars_per_point=0.5, tick_size=1.0, bin_pts=10.0),
+    SymbolSpec("MES", "CME", dollars_per_point=5.0, tick_size=0.25, bin_pts=1.0),
 ]
 
 
@@ -51,9 +54,8 @@ SYMBOLS: list[SymbolSpec] = [
 class RiskConfig:
     account_equity_usd: float = float(os.getenv("POC_EQUITY", "10000"))
     risk_per_trade_pct: float = 0.01
-    max_contracts: int = 3
-    min_contracts: int = 1       # NOTE: full-size YM/ES; for true 1% on a small
-                                 # account switch to micros (MYM/MES) before live.
+    max_contracts: int = 10      # micros are 1/10th size — allow more room
+    min_contracts: int = 1
 
 
 @dataclass(frozen=True)

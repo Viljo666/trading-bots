@@ -58,6 +58,12 @@ class SymbolBot:
 
     async def poll(self) -> None:
         df = await fetch_4h_bars(self.ib, self.contract)
+        # IBKR includes the currently-FORMING bar as the last row. The strategy
+        # confirms on candle close, so evaluating that half-empty bar misses
+        # every signal (this cost us all 4 signals of the first dry month).
+        # Keep only candles whose 4h window has fully elapsed.
+        now = pd.Timestamp.now(tz="UTC")
+        df = df[df.index + pd.Timedelta(hours=4) <= now]
         if len(df) < max(PARAMS.trend_ema, PARAMS.swing_lookback) + 2:
             return
         latest_ts = df.index[-1]

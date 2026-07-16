@@ -63,11 +63,10 @@ class BotSpec:
 
 BOTS: dict[str, BotSpec] = {
     "sweep": BotSpec("sweep", "com.villerajala.sweepfutures",
-                     PROJECT / "sweep_futures" / "launchd.out.log", ("NQ", "CL"), True),
+                     PROJECT / "sweep_futures" / "launchd.out.log", ("MNQ", "MCL"), True),
     "poc": BotSpec("poc", "com.villerajala.pocfutures",
-                   PROJECT / "poc_futures" / "launchd.out.log", ("YM", "ES"), True),
-    "tori": BotSpec("tori", "com.villerajala.toribot",
-                    PROJECT / "tori_futures" / "launchd.out.log", ("ES", "NQ", "CL", "GC")),
+                   PROJECT / "poc_futures" / "launchd.out.log", ("MYM", "MES"), True),
+    # tori retired 2026-07-16 (strategy shelved since June; plist archived in tori_futures/)
     "crypto": BotSpec("crypto", "com.villerajala.cryptoscalper",
                       PROJECT / "crypto_scalper" / "logs" / "live.log"),
     "tsmom": BotSpec("tsmom", "com.villerajala.tsmomdaily",
