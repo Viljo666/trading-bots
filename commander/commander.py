@@ -84,6 +84,8 @@ HELP = (
     "`flatten <bot> now` — close its positions\n"
     "`gateway` — IB Gateway status\n"
     "`gateway restart now` — force Gateway relogin\n"
+    "`digest` — 24h summary (auto 09:00 Mon-Sat)\n"
+    "`report` — weekly setups vs backtest (auto Sun)\n"
     f"bots: {', '.join(BOTS)}"
 )
 
@@ -266,12 +268,20 @@ def gateway_restart() -> str:
 
 # ---------- command dispatch ----------
 
+SCHEDULED_BOTS = {"tsmom"}   # daily jobs: idle between runs is normal
+
+
 def status_text() -> str:
     out = []
     for spec in BOTS.values():
         running, detail = is_running(spec.label)
         mode = bot_mode(spec)
-        dot = "🟢" if running else "🔴"
+        if running:
+            dot = "🟢"
+        elif spec.key in SCHEDULED_BOTS:
+            dot, detail = "🕐", "idle until next scheduled run"
+        else:
+            dot = "🔴"
         out.append(f"{dot} *{spec.key}* ({mode}) — {detail}")
     return "\n".join(out)
 
@@ -288,6 +298,12 @@ def handle(text: str) -> str:
         return status_text() + "\n" + gateway_status()
     if cmd == "positions":
         return positions_text()
+    if cmd == "digest":
+        import digest
+        return digest.build()
+    if cmd == "report":
+        import weekly_report
+        return weekly_report.build()
     if cmd == "gateway":
         if args and args[0] == "restart":
             if "now" not in args:
