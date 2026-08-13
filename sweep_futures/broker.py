@@ -86,7 +86,14 @@ async def fetch_4h_bars(ib: IB, contract: Future) -> pd.DataFrame:
         formatDate=2, keepUpToDate=False,
     )
     if not raw:
-        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        # Must carry a tz-aware DatetimeIndex: callers do `df.index + pd.Timedelta(...)`,
+        # and a default RangeIndex makes numpy raise "Concatenation operation is not
+        # implemented for NumPy arrays" — which crashed every poll whenever the IBKR
+        # data farm hiccuped and returned no bars.
+        return pd.DataFrame(
+            {c: [] for c in ("open", "high", "low", "close", "volume")},
+            index=pd.DatetimeIndex([], tz="UTC", name="timestamp"),
+        )
     df = pd.DataFrame([{
         "timestamp": pd.Timestamp(b.date, tz="UTC") if pd.Timestamp(b.date).tzinfo is None
         else pd.Timestamp(b.date),

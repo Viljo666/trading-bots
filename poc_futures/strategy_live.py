@@ -64,8 +64,12 @@ def size_position(risk_pts: float, dollars_per_point: float) -> int:
 def build_plan(bars: pd.DataFrame, spec: SymbolSpec, today) -> Plan | None:
     """bars: 5m OHLCV indexed in ET. today: the ET session date to trade."""
     rth = bars.between_time("09:30", "16:00")
-    sessions = {d: s for d, s in rth.groupby(rth.index.date) if len(s) >= 10}
-    if today not in sessions:
+    grouped = dict(rth.groupby(rth.index.date).__iter__())
+    # PRIOR sessions need enough bars for a meaningful volume profile; TODAY
+    # only needs its opening bar — we arm at 09:35, when just 1-2 bars exist.
+    # (Applying the >=10 filter to today made the bot skip every session.)
+    sessions = {d: s for d, s in grouped.items() if d >= today or len(s) >= 10}
+    if today not in sessions or len(sessions[today]) == 0:
         return None                       # today's open bar not in yet
     prior_dates = sorted(d for d in sessions if d < today)
     if len(prior_dates) < PARAMS.atr_period + 1:

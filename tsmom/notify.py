@@ -54,5 +54,9 @@ def daily_summary(rebalances: list[dict], dry_run: bool) -> None:
     send("\n".join(lines))
 
 
+def gateway_unreachable(attempts: int) -> None:
+    send(f"🔌 *IB Gateway not reachable* (tried {attempts}×). TSMOM will retry after Gateway restart.")
+
+
 def error(msg: str) -> None:
     send(f"⚠️ TSMOM error: {msg[:300]}")

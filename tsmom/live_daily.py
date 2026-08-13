@@ -35,7 +35,7 @@ from broker import (  # noqa: E402
     connect_paper, resolve_active_contract, current_position_size,
     place_market, positions_for_symbol,
 )
-from ib_insync import ContFuture  # noqa: E402
+from ib_insync import ContFuture, Future  # noqa: E402
 
 ROLL_BUFFER_DAYS = 8  # roll to next contract when front is within this many days of expiry
 
@@ -162,8 +162,19 @@ def main() -> None:
             for p in positions_for_symbol(ib, sym):
                 if p.contract.conId != contract.conId:
                     side = "SELL" if p.position > 0 else "BUY"
+                    # Contracts returned by ib.positions() have an EMPTY exchange field,
+                    # and placing an order on one is rejected with
+                    # "Error 321: Missing order exchange" (silently cancelled, so the
+                    # old position never closed and exposure doubled). Re-qualify by
+                    # conId with the exchange set before sending the closing order.
+                    old_c = Future(conId=p.contract.conId, exchange=exch, currency="USD")
+                    try:
+                        ib.qualifyContracts(old_c)
+                    except Exception:
+                        old_c = p.contract
+                        old_c.exchange = exch
                     if not args.dry_run:
-                        place_market(ib, p.contract, side, abs(int(p.position)), outside_rth=True)
+                        place_market(ib, old_c, side, abs(int(p.position)), outside_rth=True)
                     log_event({
                         "kind": "roll_out", "symbol": sym,
                         "old_expiry": p.contract.lastTradeDateOrContractMonth,
