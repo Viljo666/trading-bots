@@ -20,6 +20,7 @@ journal/
 state.json
 status.json
 .gateway_alert_sent
+.dirty_warned
 nohup.out
 
 # --- data caches (large, regenerable via fetchers) ---
