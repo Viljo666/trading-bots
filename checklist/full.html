@@ -1,0 +1,979 @@
+<title>Pre-Flight Desk</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  :root{
+    --bg:#EDF0F4; --surface:#FFFFFF; --surface-2:#F4F7FA; --surface-3:#E7ECF2;
+    --ink:#131A23; --ink-2:#465868; --muted:#74859A;
+    --line:#D4DBE4; --line-strong:#B6C2D0;
+    --accent:#1F4372; --accent-soft:#E3EAF4;
+    --go:#0B7A55; --go-soft:#E0F1E9;
+    --block:#A32E27; --block-soft:#FAE7E5;
+    --warn:#8E6210; --warn-soft:#F8EEDA;
+    --on-accent:#FFFFFF; --on-go:#FFFFFF;
+    --shadow:0 1px 2px rgba(19,26,35,.06), 0 8px 24px -16px rgba(19,26,35,.35);
+    --font:"Archivo","Helvetica Neue",Helvetica,Arial,sans-serif;
+    --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0E1319; --surface:#161D25; --surface-2:#1B232C; --surface-3:#222C37;
+      --ink:#E8EEF5; --ink-2:#AEBDCD; --muted:#7C8DA1;
+      --line:#27313C; --line-strong:#3A4754;
+      --accent:#8FB4E6; --accent-soft:#1A2634;
+      --go:#3ECB92; --go-soft:#122E27;
+      --block:#F0817A; --block-soft:#32191A;
+      --warn:#E2AC55; --warn-soft:#2E2413;
+      --on-accent:#0E1319; --on-go:#07211A;
+      --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 26px -18px rgba(0,0,0,.9);
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0E1319; --surface:#161D25; --surface-2:#1B232C; --surface-3:#222C37;
+    --ink:#E8EEF5; --ink-2:#AEBDCD; --muted:#7C8DA1;
+    --line:#27313C; --line-strong:#3A4754;
+    --accent:#8FB4E6; --accent-soft:#1A2634;
+    --go:#3ECB92; --go-soft:#122E27;
+    --block:#F0817A; --block-soft:#32191A;
+    --warn:#E2AC55; --warn-soft:#2E2413;
+    --on-accent:#0E1319; --on-go:#07211A;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 26px -18px rgba(0,0,0,.9);
+  }
+
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:var(--font); font-size:15px; line-height:1.45;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:600px; margin:0 auto; padding:0 16px 96px}
+
+  /* ── header ─────────────────────────────────────────── */
+  .top{
+    position:sticky; top:env(safe-area-inset-top,0px); z-index:20;
+    background:color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter:saturate(1.4) blur(10px);
+    border-bottom:1px solid var(--line);
+    margin:0 -16px 0; padding:10px 16px 10px;
+  }
+  .top-row{display:flex; align-items:baseline; justify-content:space-between; gap:12px}
+  .brand{font-weight:700; font-size:16px; letter-spacing:-.01em; margin:0}
+  .brand span{color:var(--muted); font-weight:500}
+  .clock{font-family:var(--mono); font-size:12.5px; color:var(--ink-2); font-variant-numeric:tabular-nums; white-space:nowrap}
+  .clock b{color:var(--ink); font-weight:600}
+  .meter{display:flex; gap:3px; margin-top:9px}
+  .seg{height:5px; flex:1 1 0; border-radius:99px; background:var(--line-strong); transition:background .18s}
+  .seg.on{background:var(--go)}
+  .seg.blocked{background:var(--block)}
+  .meter-label{
+    display:flex; justify-content:space-between; gap:10px; margin-top:6px;
+    font-size:11.5px; text-transform:uppercase; letter-spacing:.07em; font-weight:600; color:var(--muted);
+  }
+  .meter-label b{font-family:var(--mono); font-weight:600; letter-spacing:0; color:var(--ink-2)}
+
+  /* ── generic bits ───────────────────────────────────── */
+  .eyebrow{
+    font-size:11px; text-transform:uppercase; letter-spacing:.1em;
+    font-weight:700; color:var(--muted); margin:26px 0 8px;
+  }
+  .card{background:var(--surface); border:1px solid var(--line); border-radius:12px; box-shadow:var(--shadow)}
+  .num{font-family:var(--mono); font-variant-numeric:tabular-nums}
+
+  /* ── setup picker ───────────────────────────────────── */
+  .picker{display:flex; gap:7px; overflow-x:auto; padding:2px 16px 4px; margin:0 -16px; scrollbar-width:none}
+  .picker::-webkit-scrollbar{display:none}
+  .chip{
+    flex:0 0 auto; border:1px solid var(--line-strong); background:var(--surface);
+    color:var(--ink-2); font-family:var(--font); font-size:13px; font-weight:600;
+    padding:7px 13px; border-radius:99px; cursor:pointer; white-space:nowrap;
+  }
+  .chip[aria-pressed="true"]{background:var(--accent); border-color:var(--accent); color:var(--on-accent)}
+  .setup-note{
+    display:flex; gap:10px; align-items:flex-start;
+    margin-top:10px; padding:11px 13px; border-radius:10px;
+    background:var(--accent-soft); color:var(--ink-2); font-size:13px;
+  }
+  .setup-note .tag{
+    font-family:var(--mono); font-size:11px; font-weight:600; color:var(--accent);
+    border:1px solid currentColor; border-radius:5px; padding:1px 5px; flex:0 0 auto;
+  }
+
+  /* ── checklist ──────────────────────────────────────── */
+  .stage{margin-top:18px}
+  .stage-head{display:flex; align-items:center; gap:9px; margin:0 0 7px}
+  .stage-i{
+    font-family:var(--mono); font-size:11px; font-weight:600; color:var(--muted);
+    width:19px; height:19px; display:grid; place-items:center;
+    border:1px solid var(--line-strong); border-radius:5px;
+  }
+  .stage-t{font-size:12.5px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; margin:0}
+  .items{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:1px;
+         background:var(--line); border:1px solid var(--line); border-radius:12px; overflow:hidden; box-shadow:var(--shadow)}
+  .item{
+    display:grid; grid-template-columns:auto 1fr; gap:12px; align-items:start;
+    width:100%; text-align:left; background:var(--surface); border:0;
+    border-left:3px solid transparent; padding:13px 14px 13px 12px;
+    font:inherit; color:var(--ink); cursor:pointer; min-height:52px;
+  }
+  .item:hover{background:var(--surface-2)}
+  .item:focus-visible{outline:2px solid var(--accent); outline-offset:-2px}
+  .item.hard{border-left-color:var(--block)}
+  .item.hard[aria-pressed="true"], .item.auto-ok{border-left-color:var(--go)}
+  .item[aria-pressed="true"] .box{background:var(--go); border-color:var(--go)}
+  .item[aria-pressed="true"] .box svg{opacity:1}
+  .item[aria-pressed="true"] .txt{color:var(--ink-2)}
+  .box{
+    width:22px; height:22px; border-radius:6px; border:1.5px solid var(--line-strong);
+    background:var(--surface-2); display:grid; place-items:center; margin-top:1px; flex:0 0 auto;
+  }
+  .box svg{width:13px; height:13px; opacity:0; color:var(--on-go)}
+  .txt{font-size:14.5px; line-height:1.4; font-weight:500}
+  .why{display:block; margin-top:3px; font-size:12.5px; color:var(--muted); font-weight:400}
+  .flag{
+    display:inline-block; font-family:var(--mono); font-size:9.5px; font-weight:600;
+    letter-spacing:.06em; text-transform:uppercase; padding:1px 5px; border-radius:4px;
+    vertical-align:2px; margin-right:6px;
+  }
+  .flag.hard{background:var(--block-soft); color:var(--block)}
+  .flag.auto{background:var(--accent-soft); color:var(--accent)}
+  .item.auto{cursor:default}
+  .item.auto .box{border-style:dashed}
+  .item.auto-ok .box{background:var(--go); border-color:var(--go); border-style:solid}
+  .item.auto-ok .box svg{opacity:1}
+  .item.auto-bad{border-left-color:var(--block)}
+  .item.auto-bad .box{border-color:var(--block); background:var(--block-soft)}
+  .verdict{display:block; margin-top:3px; font-family:var(--mono); font-size:12px; font-weight:500}
+  .verdict.ok{color:var(--go)} .verdict.bad{color:var(--block)}
+
+  /* ── calculator ─────────────────────────────────────── */
+  .calc{padding:14px}
+  .grid{display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px}
+  .grid.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .f{display:flex; flex-direction:column; gap:4px; min-width:0}
+  .f label{font-size:10.5px; text-transform:uppercase; letter-spacing:.08em; font-weight:700; color:var(--muted)}
+  .f input,.f select{
+    font-family:var(--mono); font-size:15px; font-weight:500; color:var(--ink);
+    background:var(--surface-2); border:1px solid var(--line-strong); border-radius:8px;
+    padding:9px 10px; width:100%; min-width:0; -webkit-appearance:none; appearance:none;
+  }
+  .f select{font-family:var(--font); font-weight:600; font-size:14px}
+  .f input:focus,.f select:focus{outline:2px solid var(--accent); outline-offset:-1px; border-color:var(--accent)}
+  .hint{font-size:11.5px; color:var(--muted); margin:9px 0 0}
+  .out{
+    margin-top:13px; border-top:1px dashed var(--line-strong); padding-top:12px;
+    display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px 12px;
+  }
+  .o{display:flex; flex-direction:column; gap:1px}
+  .o .k{font-size:10.5px; text-transform:uppercase; letter-spacing:.08em; font-weight:700; color:var(--muted)}
+  .o .v{font-family:var(--mono); font-size:19px; font-weight:600; font-variant-numeric:tabular-nums; letter-spacing:-.01em}
+  .o .v small{font-size:12px; color:var(--muted); font-weight:500}
+  .o.bad .v{color:var(--block)}
+  .o.good .v{color:var(--go)}
+  .calc-msg{margin-top:12px; padding:10px 12px; border-radius:9px; font-size:13px; font-weight:500}
+  .calc-msg.bad{background:var(--block-soft); color:var(--block)}
+  .calc-msg.ok{background:var(--go-soft); color:var(--go)}
+
+  details.settings{margin-top:10px}
+  details.settings summary{
+    cursor:pointer; font-size:12px; font-weight:700; letter-spacing:.07em;
+    text-transform:uppercase; color:var(--muted); padding:8px 2px; list-style:none;
+  }
+  details.settings summary::-webkit-details-marker{display:none}
+  details.settings summary::before{content:"▸ "; display:inline-block; transition:transform .15s}
+  details.settings[open] summary::before{transform:rotate(90deg)}
+
+  /* ── gate ───────────────────────────────────────────── */
+  .gate{
+    position:fixed; left:0; right:0; bottom:0; z-index:30;
+    padding:10px 16px calc(10px + env(safe-area-inset-bottom,0px));
+    background:color-mix(in srgb, var(--bg) 92%, transparent);
+    backdrop-filter:saturate(1.4) blur(10px); border-top:1px solid var(--line);
+  }
+  .gate-in{max-width:600px; margin:0 auto}
+  .go-btn{
+    width:100%; border:0; border-radius:11px; padding:14px 16px; cursor:pointer;
+    font-family:var(--font); font-size:15.5px; font-weight:700; letter-spacing:.01em;
+    background:var(--go); color:var(--on-go); display:flex; align-items:center; justify-content:center; gap:9px;
+  }
+  .go-btn[disabled]{background:var(--surface-3); color:var(--muted); cursor:not-allowed; box-shadow:inset 0 0 0 1px var(--line-strong)}
+  .go-btn:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+  .gate-why{
+    font-size:12px; color:var(--block); font-weight:600; text-align:center;
+    margin:0 0 8px; line-height:1.35;
+  }
+
+  /* ── ticket + log ───────────────────────────────────── */
+  .ticket{margin-top:12px; padding:14px; border:1px solid var(--go); background:var(--go-soft); border-radius:12px}
+  .ticket h3{margin:0 0 8px; font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--go)}
+  .ticket pre{
+    margin:0; font-family:var(--mono); font-size:13.5px; line-height:1.6; color:var(--ink);
+    white-space:pre-wrap; word-break:break-word;
+  }
+  .log{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:1px;
+       background:var(--line); border:1px solid var(--line); border-radius:12px; overflow:hidden}
+  .row{background:var(--surface); padding:11px 13px; display:grid; grid-template-columns:1fr auto; gap:8px; align-items:center}
+  .row .m{min-width:0}
+  .row .h{display:flex; align-items:center; gap:7px; flex-wrap:wrap}
+  .dir{font-family:var(--mono); font-size:10.5px; font-weight:600; padding:1px 5px; border-radius:4px; letter-spacing:.05em}
+  .dir.long{background:var(--go-soft); color:var(--go)}
+  .dir.short{background:var(--block-soft); color:var(--block)}
+  .row .name{font-size:13.5px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .row .sub{font-family:var(--mono); font-size:11.5px; color:var(--muted); margin-top:2px}
+  .marks{display:flex; gap:4px; flex:0 0 auto}
+  .mk{
+    border:1px solid var(--line-strong); background:var(--surface-2); color:var(--muted);
+    font-family:var(--mono); font-size:11px; font-weight:600; border-radius:6px;
+    padding:4px 7px; cursor:pointer; min-width:30px;
+  }
+  .mk[aria-pressed="true"].w{background:var(--go); border-color:var(--go); color:var(--on-go)}
+  .mk[aria-pressed="true"].l{background:var(--block); border-color:var(--block); color:var(--on-accent)}
+  .mk[aria-pressed="true"].b{background:var(--line-strong); border-color:var(--line-strong); color:var(--ink)}
+  .empty{padding:18px 14px; background:var(--surface); color:var(--muted); font-size:13.5px}
+  .tally{display:flex; gap:14px; flex-wrap:wrap; margin:9px 2px 0; font-size:12px; color:var(--muted)}
+  .tally b{font-family:var(--mono); color:var(--ink); font-weight:600}
+  .link{background:none; border:0; color:var(--accent); font:inherit; font-size:12.5px; font-weight:600; cursor:pointer; padding:4px 0; text-decoration:underline; text-underline-offset:3px}
+  .head-row{display:flex; align-items:baseline; justify-content:space-between; gap:10px}
+  .store{font-size:11px; color:var(--muted); font-family:var(--mono)}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important; animation:none!important}}
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div class="top-row">
+      <h1 class="brand">Pre-Flight <span>/ trade desk</span></h1>
+      <div class="clock" id="clock">—</div>
+    </div>
+    <div class="meter" id="meter"></div>
+    <div class="meter-label">
+      <span id="meterText">Loading</span>
+      <span><b id="meterCount">0/0</b> rules</span>
+    </div>
+  </header>
+
+  <p class="eyebrow" style="margin-top:18px">Setup</p>
+  <div class="picker" id="picker"></div>
+  <div class="setup-note" id="setupNote"></div>
+
+  <section id="checklist"></section>
+
+  <p class="eyebrow">Size &amp; levels</p>
+  <div class="card calc">
+    <div class="grid three">
+      <div class="f">
+        <label for="inSymbol">Contract</label>
+        <select id="inSymbol"></select>
+      </div>
+      <div class="f">
+        <label for="inEntry">Entry</label>
+        <input id="inEntry" type="text" inputmode="decimal" autocomplete="off">
+      </div>
+      <div class="f">
+        <label for="inStop">Stop</label>
+        <input id="inStop" type="text" inputmode="decimal" autocomplete="off">
+      </div>
+    </div>
+    <p class="hint" id="calcHint"></p>
+
+    <div class="out" id="calcOut"></div>
+    <div id="calcMsg"></div>
+
+    <details class="settings">
+      <summary>Risk settings</summary>
+      <div class="grid">
+        <div class="f">
+          <label for="inEquity">Account equity ($)</label>
+          <input id="inEquity" type="text" inputmode="decimal" autocomplete="off">
+        </div>
+        <div class="f">
+          <label for="inRisk">Risk per trade (%)</label>
+          <input id="inRisk" type="text" inputmode="decimal" autocomplete="off">
+        </div>
+        <div class="f">
+          <label for="inRR">Reward : risk</label>
+          <input id="inRR" type="text" inputmode="decimal" autocomplete="off">
+        </div>
+        <div class="f">
+          <label for="inMaxTrades">Max trades / day</label>
+          <input id="inMaxTrades" type="text" inputmode="numeric" autocomplete="off">
+        </div>
+        <div class="f">
+          <label for="inStopR">Daily loss stop (R)</label>
+          <input id="inStopR" type="text" inputmode="decimal" autocomplete="off">
+        </div>
+        <div class="f">
+          <label for="inSizeMult">Size multiplier</label>
+          <input id="inSizeMult" type="text" inputmode="decimal" autocomplete="off">
+        </div>
+      </div>
+      <p class="hint">The multiplier scales risk for research-grade setups — 0.5 halves it.</p>
+    </details>
+  </div>
+
+  <div id="ticket"></div>
+
+  <div class="head-row" style="margin-top:26px">
+    <p class="eyebrow" style="margin:0">Today &amp; log</p>
+    <span class="store" id="store">local only</span>
+  </div>
+  <div class="tally" id="tally"></div>
+  <ul class="log" id="log" style="margin-top:9px"></ul>
+  <button class="link" id="clearBoard" style="margin-top:6px">Clear ticks and start a fresh plan</button>
+</div>
+
+<div class="gate">
+  <div class="gate-in">
+    <p class="gate-why" id="gateWhy" hidden></p>
+    <button class="go-btn" id="goBtn" disabled>Checklist incomplete</button>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  /* ───────────── instruments ───────────── */
+  var INSTR = {
+    MES:{n:"MES · Micro S&P",   pv:5,    tick:0.25, dp:2},
+    MNQ:{n:"MNQ · Micro Nasdaq",pv:2,    tick:0.25, dp:2},
+    MYM:{n:"MYM · Micro Dow",   pv:0.5,  tick:1,    dp:0},
+    MCL:{n:"MCL · Micro Crude", pv:100,  tick:0.01, dp:2},
+    MGC:{n:"MGC · Micro Gold",  pv:10,   tick:0.1,  dp:1},
+    M2K:{n:"M2K · Micro Russell",pv:5,   tick:0.1,  dp:1},
+    ES: {n:"ES · E-mini S&P",   pv:50,   tick:0.25, dp:2},
+    NQ: {n:"NQ · E-mini Nasdaq",pv:20,   tick:0.25, dp:2},
+    YM: {n:"YM · E-mini Dow",   pv:5,    tick:1,    dp:0},
+    CL: {n:"CL · Crude",        pv:1000, tick:0.01, dp:2}
+  };
+
+  /* ───────────── checklists ─────────────
+     Rules are lifted from the pine scripts and bot configs in this
+     workspace. hard:true = a rule that blocks the trade.            */
+  var GUARD = {
+    t:"Desk guardrails",
+    items:[
+      {id:"g1", auto:"dailyStop", hard:true, txt:"Daily loss stop is not hit",
+       why:"Realized R today against the stop you set below."},
+      {id:"g2", auto:"tradeCap", hard:true, txt:"Under the trade cap for today",
+       why:"More entries after the cap is where good days get given back."},
+      {id:"g3", hard:true, txt:"No high-impact release inside 30 minutes",
+       why:"FOMC, CPI, NFP — and EIA inventories if you're on crude."},
+      {id:"g4", hard:true, txt:"This is not a revenge trade",
+       why:"The setup fired first. You are not buying back the last loss."},
+      {id:"g5", txt:"You are fit to trade it",
+       why:"Not half-asleep, not walking somewhere, not on a flaky connection."}
+    ]
+  };
+
+  var SETUPS = [
+    {
+      id:"poc", name:"POC continuation", sym:"MES", rr:3, cutoff:"15:00", flat:"15:55",
+      tag:"Validated", note:"Your best-validated edge — the live MES/MYM bot's setup, traded by hand. NQ failed this validation; don't substitute it.",
+      stages:[
+        {t:"Context", items:[
+          {id:"p1", hard:true, txt:"Symbol is ES/MES or YM/MYM", why:"The walk-forward only holds on these two. NQ tested negative."},
+          {id:"p2", hard:true, txt:"Prior completed RTH POC is drawn on a 5m chart", why:"Row size: ES 1 point, YM 10 points, NQ 4 points."},
+          {id:"p3", txt:"Today's RTH opened clearly on one side of that POC", why:"Opening on top of the POC is a no-trade day."},
+          {id:"p4", txt:"14-session RTH ATR is read for the stop", why:"Stop distance is 0.25 × that ATR, not a round number."}
+        ]},
+        {t:"Trigger", items:[
+          {id:"p5", hard:true, txt:"Price has travelled back to the POC from the open side", why:"You take the retest, never a level price hasn't left."},
+          {id:"p6", hard:true, txt:"Direction is continuation, not a fade", why:"Opened below POC → long through it. Opened above → short through it. The fade loses."},
+          {id:"p7", txt:"Entry is at the POC, not ten points past it", why:"Late entry keeps the stop and kills the 3R."}
+        ]},
+        {t:"Risk", items:[
+          {id:"p8", hard:true, txt:"Stop is 0.25 × RTH ATR beyond the POC", why:"Beyond the level, not at it."},
+          {id:"p9", hard:true, txt:"Target is 3R and it stays there", why:"No breakeven move, no trail, no manual exit — that was tested and it's worse."},
+          {id:"auto_size", auto:"sizing", hard:true, txt:"Size comes from the calculator", why:"Contracts computed from the stop distance below."},
+          {id:"p10", hard:true, txt:"Stop and target are resting orders before you look away", why:"Mental stops are not stops."}
+        ]},
+        {t:"Window", items:[
+          {id:"auto_time", auto:"cutoff", hard:true, txt:"Entry window is open", why:""},
+          {id:"p11", hard:true, txt:"You will be flat by 15:55 ET", why:"No overnight carry on this setup, ever."}
+        ]}
+      ]
+    },
+    {
+      id:"nqretest", name:"NQ POC retest", sym:"MNQ", rr:3, cutoff:"15:00", flat:"15:55", mult:0.5,
+      tag:"Research", note:"Research-grade companion for NQ/MNQ. The confirmed close through the POC is the whole difference from the ES/YM version — size it small until it earns more.",
+      stages:[
+        {t:"Context", items:[
+          {id:"n1", hard:true, txt:"NQ or MNQ on a 5m chart, POC rows at 4 points", why:"The indicator only computes correctly at that row size."},
+          {id:"n2", txt:"Prior completed RTH POC is drawn", why:"Yesterday's RTH profile, not the overnight one."}
+        ]},
+        {t:"Trigger", items:[
+          {id:"n3", hard:true, txt:"A 5m candle has CLOSED through the POC", why:"The confirmation leg. Without it this is the setup that failed validation."},
+          {id:"n4", hard:true, txt:"Price has since traded back to the POC on a later candle", why:"Retest after confirmation — two separate events, in order."},
+          {id:"n5", txt:"Entry is continuation through the POC, in the confirmed direction", why:""}
+        ]},
+        {t:"Risk", items:[
+          {id:"n6", hard:true, txt:"Stop 0.25 × RTH ATR beyond the POC, target 3R", why:""},
+          {id:"auto_size", auto:"sizing", hard:true, txt:"Size comes from the calculator", why:"Multiplier is set to 0.5 — this setup is unvalidated."},
+          {id:"n7", hard:true, txt:"Half normal risk, because this one is research", why:"It has not passed what MES/MYM passed."},
+          {id:"n8", hard:true, txt:"Stop and target are resting orders", why:""}
+        ]},
+        {t:"Window", items:[
+          {id:"auto_time", auto:"cutoff", hard:true, txt:"Entry window is open", why:""},
+          {id:"n9", hard:true, txt:"Flat by 15:55 ET", why:""}
+        ]}
+      ]
+    },
+    {
+      id:"midnight", name:"Midnight open", sym:"MNQ", rr:1, cutoff:"10:30", flat:"15:55", maxRisk:200,
+      tag:"Research", note:"Opening range breaks back toward the 00:00 NY open. Target is a level, not a multiple — reward/risk is whatever the midnight open pays.",
+      stages:[
+        {t:"Context", items:[
+          {id:"m1", hard:true, txt:"The 00:00 New York open is marked on the chart", why:"That price is the target. Mark it before 09:30."},
+          {id:"m2", txt:"The 09:30–09:45 opening range is drawn", why:""},
+          {id:"m3", hard:true, txt:"Bias points from the 09:30 open toward the midnight open", why:"That direction is the only one you trade today."},
+          {id:"m4", hard:true, txt:"Open-to-midnight distance is ≤ 0.5 × prior RTH ATR", why:"Further than that and the target is out of reach — skip the day."}
+        ]},
+        {t:"Trigger", items:[
+          {id:"m5", hard:true, txt:"A completed 5m candle closed through the opening range", why:"Completed close. Not a wick, not a candle still forming."},
+          {id:"m6", txt:"The break is in the bias direction", why:"A break the other way is a no-trade, not a reverse."}
+        ]},
+        {t:"Risk", items:[
+          {id:"m7", hard:true, txt:"Stop is beyond the signal candle plus 0.5 points", why:""},
+          {id:"m8", hard:true, txt:"Target is the midnight open and R:R to it is ≥ 0.5", why:"Below 0.5 the setup is rejected by its own rules."},
+          {id:"auto_size", auto:"sizing", hard:true, txt:"Size comes from the calculator", why:""},
+          {id:"auto_cap", auto:"maxRisk", hard:true, txt:"Planned risk is within the $200 cap", why:"Cap includes the ~$4 round turn."},
+          {id:"m9", hard:true, txt:"Stop and target are resting orders", why:""}
+        ]},
+        {t:"Window", items:[
+          {id:"auto_time", auto:"cutoff", hard:true, txt:"Entry window is open", why:""},
+          {id:"m10", hard:true, txt:"Unresolved trade gets flattened at 15:55 ET", why:""}
+        ]}
+      ]
+    },
+    {
+      id:"fvg", name:"Top-down FVG sweep", sym:"MNQ", rr:2, cutoff:"15:00", flat:"15:55",
+      tag:"Discretionary", note:"The five-step top-down checklist: HTF zone → sweep → shift → displacement FVG → retracement entry. Every step is a completed candle, never a forming one.",
+      stages:[
+        {t:"Structure", items:[
+          {id:"f1", hard:true, txt:"Daily / 4H / 1H bias: at least 2 of 3 agree", why:"Counter-bias setups are the ones that bleed."},
+          {id:"f2", hard:true, txt:"A completed 1H three-candle FVG is the key zone", why:"Completed candles only — no lookahead on yourself."},
+          {id:"f3", txt:"The zone is still valid", why:"Invalidated once price closes through the far edge."}
+        ]},
+        {t:"Sweep &amp; shift", items:[
+          {id:"f4", hard:true, txt:"Price entered the zone and swept + reclaimed a confirmed pivot", why:"Pivot needs candles on both sides — confirmed, not the live bar."},
+          {id:"f5", hard:true, txt:"A completed entry-TF candle closed through the opposite pivot", why:"The CISD / market-structure shift. This is the permission slip."},
+          {id:"f6", txt:"Displacement left a fresh FVG — discount for longs, premium for shorts", why:""},
+          {id:"f7", txt:"No more than 48 bars from the sweep to this entry", why:"Older than that and the setup is stale."}
+        ]},
+        {t:"Entry &amp; risk", items:[
+          {id:"f8", txt:"Entry is a limit at 50% of that new FVG", why:"You wait for the retrace. No market chase."},
+          {id:"f9", hard:true, txt:"Stop sits beyond the sweep wick", why:""},
+          {id:"f10", hard:true, txt:"Target is ≥ 2R at real liquidity", why:"Equal highs or lows — a level other people have orders at."},
+          {id:"auto_size", auto:"sizing", hard:true, txt:"Size comes from the calculator", why:""},
+          {id:"f11", txt:"Cancel the limit if it hasn't filled in 12 bars", why:""}
+        ]},
+        {t:"Window", items:[
+          {id:"auto_time", auto:"cutoff", hard:true, txt:"Entry window is open", why:""},
+          {id:"f12", hard:true, txt:"Flat by the close", why:""}
+        ]}
+      ]
+    },
+    {
+      id:"poclq", name:"POC + liquidity", sym:"MNQ", rr:2, cutoff:"15:00", flat:"16:00",
+      tag:"Discretionary", note:"Top-down NQ variant: 4H structure event, strict M/W/D bias, entry from a safe swing back toward the prior RTH POC and the liquidity beyond it.",
+      stages:[
+        {t:"Structure", items:[
+          {id:"q1", hard:true, txt:"A 4H structure event is live and under 12 hours old", why:"Past that the setup has expired — wait for a new one."},
+          {id:"q2", hard:true, txt:"Strict monthly / weekly / daily bias agrees", why:"All three, on completed candles."},
+          {id:"q3", txt:"Prior RTH POC and the liquidity pools are drawn", why:"You need to see what the target actually is."}
+        ]},
+        {t:"Entry &amp; risk", items:[
+          {id:"q4", txt:"Entry-timeframe safe level identified", why:"A confirmed swing, stop one tick beyond it."},
+          {id:"q5", hard:true, txt:"Target is visible liquidity at ≥ 1.5R", why:"If nothing is in the way, 2R fixed — otherwise skip."},
+          {id:"q6", hard:true, txt:"Stop stays at the safe level — no trailing", why:"Trailing was tested off. Leave it off."},
+          {id:"auto_size", auto:"sizing", hard:true, txt:"Size comes from the calculator", why:""},
+          {id:"q7", hard:true, txt:"Stop and target are resting orders", why:""}
+        ]},
+        {t:"Window", items:[
+          {id:"auto_time", auto:"cutoff", hard:true, txt:"Entry window is open", why:""},
+          {id:"q8", hard:true, txt:"Close the setup at 16:00 New York", why:""}
+        ]}
+      ]
+    },
+    {
+      id:"manual", name:"Anything else", sym:"MES", rr:2, cutoff:"15:00", flat:"15:55",
+      tag:"Off-book", note:"For a trade that isn't one of the tested setups. The bar is higher, not lower: if you can't fill this in, you don't have a trade.",
+      stages:[
+        {t:"The case", items:[
+          {id:"x1", hard:true, txt:"You can name the setup out loud", why:"If it needs a paragraph, it's a feeling."},
+          {id:"x2", hard:true, txt:"The level was marked before price arrived", why:"Levels drawn after the fact always look perfect."},
+          {id:"x3", txt:"You've traded this pattern before and know its rough hit rate", why:""}
+        ]},
+        {t:"Risk", items:[
+          {id:"x4", hard:true, txt:"Entry, stop and target are all defined right now", why:"Before entry, not after."},
+          {id:"auto_rr", auto:"minRR", hard:true, txt:"Reward:risk is at least 2", why:""},
+          {id:"auto_size", auto:"sizing", hard:true, txt:"Size comes from the calculator", why:""},
+          {id:"x5", hard:true, txt:"Stop and target are resting orders", why:""}
+        ]},
+        {t:"Window", items:[
+          {id:"auto_time", auto:"cutoff", hard:true, txt:"Entry window is open", why:""},
+          {id:"x6", txt:"You know when you'll be flat", why:""}
+        ]}
+      ]
+    }
+  ];
+
+  /* ───────────── state ───────────── */
+  var S = {
+    setupId:"poc",
+    symbol:"MES",
+    entry:"", stop:"",
+    equity:10000, riskPct:1, rr:3, maxTrades:3, dailyStopR:3, sizeMult:1,
+    ticks:{},          // {setupId+"|"+itemId: true}
+    ticksDate:"",
+    trades:[],
+    lastTicket:null
+  };
+  var db = null, unsub = null;
+  var LS = "preflight.v1";
+
+  function lsGet(){ try{ return JSON.parse(localStorage.getItem(LS)||"{}"); }catch(e){ return {}; } }
+  function lsSet(o){ try{ localStorage.setItem(LS, JSON.stringify(o)); }catch(e){} }
+
+  /* ───────────── New York clock ───────────── */
+  var etFmt = new Intl.DateTimeFormat("en-US",{timeZone:"America/New_York",hour12:false,
+    year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",weekday:"short"});
+  function et(d){
+    var p={}, parts = etFmt.formatToParts(d||new Date());
+    for(var i=0;i<parts.length;i++) p[parts[i].type]=parts[i].value;
+    var h = p.hour==="24" ? 0 : parseInt(p.hour,10);
+    return {
+      date: p.year+"-"+p.month+"-"+p.day,
+      hm: (h<10?"0":"")+h+":"+p.minute,
+      mins: h*60+parseInt(p.minute,10),
+      wd: p.weekday
+    };
+  }
+  function toMins(hm){ var a=hm.split(":"); return parseInt(a[0],10)*60+parseInt(a[1],10); }
+
+  /* ───────────── helpers ───────────── */
+  function setup(){ for(var i=0;i<SETUPS.length;i++) if(SETUPS[i].id===S.setupId) return SETUPS[i]; return SETUPS[0]; }
+  function num(v){ var n=parseFloat(String(v).replace(",",".")); return isFinite(n)?n:NaN; }
+  function fmt(n,dp){ return isFinite(n) ? n.toFixed(dp==null?2:dp) : "—"; }
+  function esc(s){ return String(s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c];}); }
+
+  /* the whole plan, computed once per render */
+  function plan(){
+    var su = setup(), ins = INSTR[S.symbol] || INSTR.MES;
+    var e = num(S.entry), st = num(S.stop);
+    var p = { su:su, ins:ins, entry:e, stop:st, ok:false, reason:"" };
+    p.riskBudget = S.equity * (S.riskPct/100) * (S.sizeMult||1);
+    if(!isFinite(e) || !isFinite(st)){ p.reason = "Enter an entry and a stop."; return p; }
+    if(e === st){ p.reason = "Entry and stop are the same price."; return p; }
+    p.dir = st < e ? "LONG" : "SHORT";
+    p.dist = Math.abs(e - st);
+    p.ticks = p.dist / ins.tick;
+    p.perContract = p.dist * ins.pv;
+    p.contracts = Math.floor(p.riskBudget / p.perContract);
+    p.rr = S.rr;
+    p.target = p.dir === "LONG" ? e + p.dist*p.rr : e - p.dist*p.rr;
+    if(p.contracts < 1){
+      p.contracts = 0;
+      p.reason = "One contract risks $" + fmt(p.perContract,0) + " — more than the $" + fmt(p.riskBudget,0) + " budget. Tighten the stop, size down the contract, or skip it.";
+      return p;
+    }
+    p.riskUsd = p.contracts * p.perContract;
+    p.rewardUsd = p.riskUsd * p.rr;
+    p.pctEquity = p.riskUsd / S.equity * 100;
+    p.ok = true;
+    return p;
+  }
+
+  function todayTrades(){
+    var d = et().date;
+    return S.trades.filter(function(t){ return t.d === d; });
+  }
+  function realizedR(){
+    return todayTrades().reduce(function(a,t){ return a + (typeof t.r === "number" ? t.r : 0); }, 0);
+  }
+
+  /* auto-rule evaluation → {ok, line} */
+  function evalAuto(kind, p){
+    var su = p.su, now = et();
+    if(kind === "cutoff"){
+      var c = toMins(su.cutoff), open = toMins("09:30");
+      var weekend = now.wd === "Sat" || now.wd === "Sun";
+      if(weekend) return {ok:false, line:now.wd + " " + now.hm + " ET — market is closed"};
+      if(now.mins < open) return {ok:false, line:now.hm + " ET — RTH opens 09:30"};
+      if(now.mins >= c) return {ok:false, line:now.hm + " ET — past the " + su.cutoff + " cutoff, no new entries"};
+      return {ok:true, line:now.hm + " ET — open until " + su.cutoff + " (flat " + su.flat + ")"};
+    }
+    if(kind === "sizing"){
+      if(!p.ok) return {ok:false, line:p.reason || "Size not computed"};
+      return {ok:true, line:p.contracts + " × " + S.symbol + " = $" + fmt(p.riskUsd,0) + " at risk (" + fmt(p.pctEquity,2) + "% of equity)"};
+    }
+    if(kind === "maxRisk"){
+      if(!p.ok) return {ok:false, line:"Size not computed yet"};
+      var cap = su.maxRisk || 200;
+      return p.riskUsd <= cap
+        ? {ok:true, line:"$" + fmt(p.riskUsd,0) + " planned, cap $" + cap}
+        : {ok:false, line:"$" + fmt(p.riskUsd,0) + " planned — over the $" + cap + " cap"};
+    }
+    if(kind === "minRR"){
+      return S.rr >= 2 ? {ok:true, line:"R:R set to " + fmt(S.rr,1)} : {ok:false, line:"R:R is " + fmt(S.rr,1) + " — below 2"};
+    }
+    if(kind === "dailyStop"){
+      var r = realizedR();
+      return r > -S.dailyStopR
+        ? {ok:true, line:(r>=0?"+":"") + fmt(r,2) + "R today, stop at -" + fmt(S.dailyStopR,0) + "R"}
+        : {ok:false, line:fmt(r,2) + "R today — daily stop hit. Done for the day."};
+    }
+    if(kind === "tradeCap"){
+      var n = todayTrades().length;
+      return n < S.maxTrades
+        ? {ok:true, line:n + " of " + S.maxTrades + " taken today"}
+        : {ok:false, line:n + " trades already — that is the cap"};
+    }
+    return {ok:true, line:""};
+  }
+
+  function allStages(){
+    var su = setup();
+    return [GUARD].concat(su.stages);
+  }
+  function key(itemId){ return S.setupId + "|" + itemId; }
+
+  /* ───────────── rendering ───────────── */
+  var $ = function(id){ return document.getElementById(id); };
+
+  function renderPicker(){
+    $("picker").innerHTML = SETUPS.map(function(s){
+      return '<button class="chip" type="button" data-setup="'+s.id+'" aria-pressed="'+(s.id===S.setupId)+'">'+esc(s.name)+'</button>';
+    }).join("");
+    var su = setup();
+    $("setupNote").innerHTML = '<span class="tag">'+esc(su.tag)+'</span><span>'+esc(su.note)+'</span>';
+  }
+
+  function renderChecklist(p){
+    var html = "", stages = allStages();
+    for(var i=0;i<stages.length;i++){
+      var stg = stages[i];
+      html += '<div class="stage"><div class="stage-head"><span class="stage-i">'+(i===0?"!":i)+'</span>'+
+              '<h2 class="stage-t">'+stg.t+'</h2></div><ul class="items">';
+      for(var j=0;j<stg.items.length;j++){
+        var it = stg.items[j];
+        var flag = it.hard ? '<span class="flag hard">hard</span>' : '';
+        if(it.auto){
+          var r = evalAuto(it.auto, p);
+          html += '<li><div class="item auto '+(r.ok?"auto-ok":"auto-bad")+'">'+
+                  '<span class="box">'+checkSvg()+'</span><span class="txt">'+flag+
+                  '<span class="flag auto">auto</span>'+it.txt+
+                  '<span class="verdict '+(r.ok?"ok":"bad")+'">'+esc(r.line)+'</span>'+
+                  (it.why?'<span class="why">'+it.why+'</span>':'')+
+                  '</span></div></li>';
+        }else{
+          var on = !!S.ticks[key(it.id)];
+          html += '<li><button type="button" class="item'+(it.hard?" hard":"")+'" data-tick="'+it.id+'" aria-pressed="'+on+'">'+
+                  '<span class="box">'+checkSvg()+'</span><span class="txt">'+flag+it.txt+
+                  (it.why?'<span class="why">'+it.why+'</span>':'')+
+                  '</span></button></li>';
+        }
+      }
+      html += '</ul></div>';
+    }
+    $("checklist").innerHTML = html;
+  }
+  function checkSvg(){
+    return '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 8.5l3.5 3.5 7.5-8" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  }
+
+  function status(p){
+    var stages = allStages(), total = 0, done = 0, blockers = [];
+    for(var i=0;i<stages.length;i++){
+      for(var j=0;j<stages[i].items.length;j++){
+        var it = stages[i].items[j];
+        var ok = it.auto ? evalAuto(it.auto, p).ok : !!S.ticks[key(it.id)];
+        total++; if(ok) done++;
+        if(!ok && it.hard) blockers.push(it.txt);
+      }
+    }
+    return {total:total, done:done, blockers:blockers, ready: done===total};
+  }
+
+  function renderHeader(p, stt){
+    var now = et();
+    $("clock").innerHTML = '<b>'+now.hm+'</b> ET · '+now.wd;
+    var m = "";
+    for(var i=0;i<stt.total;i++){
+      m += '<span class="seg'+(i < stt.done ? " on" : (stt.blockers.length && i >= stt.done ? "" : "")) +'"></span>';
+    }
+    $("meter").innerHTML = m;
+    $("meterCount").textContent = stt.done + "/" + stt.total;
+    $("meterText").textContent = stt.ready ? "All rules met" :
+      (stt.blockers.length ? stt.blockers.length + " hard rule" + (stt.blockers.length>1?"s":"") + " unmet" : "Confirmations pending");
+    $("meterText").style.color = stt.ready ? "var(--go)" : (stt.blockers.length ? "var(--block)" : "var(--muted)");
+  }
+
+  function renderCalc(p){
+    var ins = p.ins;
+    $("calcHint").textContent = ins.n + " · $" + ins.pv + " per point · tick " + ins.tick +
+      " · risk budget $" + fmt(p.riskBudget,0) + (S.sizeMult!==1 ? " (×"+S.sizeMult+")" : "");
+    if(!p.ok && !isFinite(p.entry)){
+      $("calcOut").innerHTML = '<div class="o"><span class="k">Waiting</span><span class="v">—</span></div>'+
+        '<div class="o"><span class="k">for levels</span><span class="v">—</span></div>';
+      $("calcMsg").innerHTML = '<div class="calc-msg">Type today\'s entry and stop from the chart. Direction comes from which side the stop is on.</div>';
+      return;
+    }
+    var rows = [
+      ["Direction", p.dir || "—", p.dir==="LONG"?"good":(p.dir?"bad":"")],
+      ["Contracts", (p.contracts||0) + " <small>× "+S.symbol+"</small>", p.contracts?"good":"bad"],
+      ["Risk", "$" + fmt(p.riskUsd||0,0) + " <small>"+fmt(p.pctEquity||0,2)+"%</small>", ""],
+      ["Stop distance", fmt(p.dist, ins.dp) + " <small>"+fmt(p.ticks,0)+" ticks</small>", ""],
+      ["Target " + fmt(p.rr,1) + "R", fmt(p.target, ins.dp), ""],
+      ["If it wins", "$" + fmt(p.rewardUsd||0,0), "good"]
+    ];
+    $("calcOut").innerHTML = rows.map(function(r){
+      return '<div class="o '+r[2]+'"><span class="k">'+r[0]+'</span><span class="v">'+r[1]+'</span></div>';
+    }).join("");
+    $("calcMsg").innerHTML = p.ok ? "" : '<div class="calc-msg bad">'+esc(p.reason)+'</div>';
+  }
+
+  function renderGate(p, stt){
+    var btn = $("goBtn"), why = $("gateWhy");
+    if(stt.ready && p.ok){
+      btn.disabled = false;
+      btn.textContent = "Log the plan · " + (p.contracts) + " × " + S.symbol + " " + p.dir;
+      why.hidden = true;
+    }else{
+      btn.disabled = true;
+      var left = stt.total - stt.done;
+      btn.textContent = stt.blockers.length ? "Blocked" : left + " to confirm";
+      if(stt.blockers.length){
+        why.hidden = false;
+        why.textContent = stt.blockers[0] + (stt.blockers.length>1 ? "  (+"+(stt.blockers.length-1)+" more)" : "");
+      }else{
+        why.hidden = true;
+      }
+    }
+  }
+
+  function renderTicket(){
+    var t = S.lastTicket;
+    if(!t){ $("ticket").innerHTML = ""; return; }
+    var dp = (INSTR[t.sym]||INSTR.MES).dp;
+    $("ticket").innerHTML =
+      '<div class="ticket"><h3>Logged '+esc(t.hm)+' ET — now place it</h3><pre>'+
+      esc(t.dir + " " + t.qty + " × " + t.sym) + "\n" +
+      esc("Entry   " + fmt(t.entry,dp)) + "\n" +
+      esc("Stop    " + fmt(t.stop,dp) + "   (-$" + fmt(t.riskUsd,0) + ")") + "\n" +
+      esc("Target  " + fmt(t.target,dp) + "   (+$" + fmt(t.riskUsd*t.rr,0) + ")") +
+      '</pre></div>';
+  }
+
+  function renderLog(){
+    var tt = todayTrades(), r = realizedR();
+    $("tally").innerHTML =
+      '<span>Today <b>'+tt.length+'</b> / '+S.maxTrades+' trades</span>'+
+      '<span>Realized <b style="color:'+(r>0?"var(--go)":(r<0?"var(--block)":"var(--ink)"))+'">'+(r>0?"+":"")+fmt(r,2)+'R</b></span>'+
+      '<span>Open risk budget <b>$'+fmt(S.equity*(S.riskPct/100),0)+'</b> per trade</span>';
+
+    if(!S.trades.length){
+      $("log").innerHTML = '<li class="empty">Nothing logged yet. Every plan you clear through the checklist lands here, and you mark the result when it closes.</li>';
+      return;
+    }
+    var rows = S.trades.slice(0,40).map(function(t){
+      var dp = (INSTR[t.sym]||INSTR.MES).dp;
+      return '<li class="row"><div class="m"><div class="h">'+
+        '<span class="dir '+(t.dir==="LONG"?"long":"short")+'">'+t.dir+'</span>'+
+        '<span class="name">'+esc(t.qty+" × "+t.sym+" · "+t.setup)+'</span></div>'+
+        '<div class="sub">'+esc(t.d.slice(5)+" "+t.hm+"  ·  "+fmt(t.entry,dp)+" → "+fmt(t.target,dp)+"  ·  stop "+fmt(t.stop,dp)+"  ·  $"+fmt(t.riskUsd,0))+'</div></div>'+
+        '<div class="marks">'+
+          '<button class="mk w" type="button" data-mark="win" data-id="'+t.id+'" aria-pressed="'+(t.o==="win")+'">W</button>'+
+          '<button class="mk b" type="button" data-mark="be" data-id="'+t.id+'" aria-pressed="'+(t.o==="be")+'">BE</button>'+
+          '<button class="mk l" type="button" data-mark="loss" data-id="'+t.id+'" aria-pressed="'+(t.o==="loss")+'">L</button>'+
+        '</div></li>';
+    }).join("");
+    $("log").innerHTML = rows;
+  }
+
+  function render(){
+    var p = plan(), stt = status(p);
+    renderPicker();
+    renderChecklist(p);
+    renderHeader(p, stt);
+    renderCalc(p);
+    renderGate(p, stt);
+    renderTicket();
+    renderLog();
+    persistLocal();
+  }
+
+  /* ───────────── persistence ───────────── */
+  function settingsBody(){
+    return {equity:S.equity, riskPct:S.riskPct, rr:S.rr, maxTrades:S.maxTrades,
+            dailyStopR:S.dailyStopR, sizeMult:S.sizeMult, symbol:S.symbol, setupId:S.setupId};
+  }
+  function persistLocal(){
+    lsSet({s:settingsBody(), ticks:S.ticks, ticksDate:S.ticksDate, entry:S.entry, stop:S.stop,
+           trades: db ? [] : S.trades.slice(0,60)});
+  }
+  var saveTimer = null;
+  function saveSettings(){
+    persistLocal();
+    if(!db) return;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(function(){
+      db.doc("config/settings").set(settingsBody()).catch(function(){});
+    }, 600);
+  }
+  function saveTrade(t){
+    if(!db){ persistLocal(); return; }
+    db.doc("trades/" + t.id).set(t).catch(function(e){
+      if(e && e.code === "quota_exceeded") alert("Trade log is full — delete some older entries.");
+    });
+  }
+
+  /* ───────────── actions ───────────── */
+  document.addEventListener("click", function(ev){
+    var el;
+
+    if((el = ev.target.closest("[data-setup]"))){
+      S.setupId = el.getAttribute("data-setup");
+      var su = setup();
+      S.symbol = su.sym; $("inSymbol").value = su.sym;
+      S.rr = su.rr; $("inRR").value = su.rr;
+      S.sizeMult = su.mult || 1; $("inSizeMult").value = S.sizeMult;
+      S.lastTicket = null;
+      saveSettings(); render(); return;
+    }
+
+    if((el = ev.target.closest("[data-tick]"))){
+      var k = key(el.getAttribute("data-tick"));
+      if(S.ticks[k]) delete S.ticks[k]; else S.ticks[k] = true;
+      S.ticksDate = et().date;
+      render(); return;
+    }
+
+    if((el = ev.target.closest("[data-mark]"))){
+      var id = el.getAttribute("data-id"), mark = el.getAttribute("data-mark");
+      for(var i=0;i<S.trades.length;i++){
+        if(S.trades[i].id === id){
+          var t = S.trades[i];
+          if(t.o === mark){ t.o = null; t.r = 0; }
+          else { t.o = mark; t.r = mark === "win" ? t.rr : (mark === "loss" ? -1 : 0); }
+          saveTrade(t);
+          break;
+        }
+      }
+      render(); return;
+    }
+
+    if(ev.target.id === "clearBoard"){
+      S.ticks = {}; S.lastTicket = null; S.entry = ""; S.stop = "";
+      $("inEntry").value = ""; $("inStop").value = "";
+      render(); return;
+    }
+
+    if(ev.target.id === "goBtn"){
+      var p = plan(), stt = status(p);
+      if(!stt.ready || !p.ok) return;
+      var now = et();
+      var t = {
+        id: String(Date.now()),
+        ts: Date.now(), d: now.date, hm: now.hm,
+        setup: p.su.name, setupId: p.su.id, sym: S.symbol, dir: p.dir,
+        entry: p.entry, stop: p.stop, target: p.target,
+        qty: p.contracts, riskUsd: p.riskUsd, rr: p.rr,
+        o: null, r: 0
+      };
+      S.trades.unshift(t);
+      S.lastTicket = t;
+      S.ticks = {};
+      saveTrade(t);
+      render();
+      window.scrollTo({top:0, behavior:"smooth"});
+      return;
+    }
+  });
+
+  function bindNum(id, field, min, max){
+    var el = $(id);
+    el.addEventListener("input", function(){
+      var v = num(el.value);
+      if(isFinite(v)){
+        if(min!=null) v = Math.max(min, v);
+        if(max!=null) v = Math.min(max, v);
+        S[field] = v;
+      }
+      saveSettings(); render();
+    });
+  }
+  function bindText(id, field){
+    var el = $(id);
+    el.addEventListener("input", function(){ S[field] = el.value; persistLocal(); render(); });
+  }
+
+  /* ───────────── boot ───────────── */
+  function boot(){
+    $("inSymbol").innerHTML = Object.keys(INSTR).map(function(k){
+      return '<option value="'+k+'">'+esc(INSTR[k].n)+'</option>';
+    }).join("");
+
+    var saved = lsGet();
+    if(saved.s){ for(var k in saved.s) if(k in S) S[k] = saved.s[k]; }
+    if(saved.ticksDate === et().date && saved.ticks) { S.ticks = saved.ticks; S.ticksDate = saved.ticksDate; }
+    if(saved.trades && saved.trades.length) S.trades = saved.trades;
+    if(typeof saved.entry === "string") S.entry = saved.entry;
+    if(typeof saved.stop === "string") S.stop = saved.stop;
+
+    // Example levels so the desk opens in a working state — overwrite them.
+    if(!S.entry && !S.stop){ S.entry = "5842.25"; S.stop = "5831.50"; }
+
+    $("inSymbol").value = S.symbol;
+    $("inEntry").value = S.entry;
+    $("inStop").value = S.stop;
+    $("inEquity").value = S.equity;
+    $("inRisk").value = S.riskPct;
+    $("inRR").value = S.rr;
+    $("inMaxTrades").value = S.maxTrades;
+    $("inStopR").value = S.dailyStopR;
+    $("inSizeMult").value = S.sizeMult;
+
+    $("inSymbol").addEventListener("change", function(){ S.symbol = $("inSymbol").value; saveSettings(); render(); });
+    bindText("inEntry","entry");
+    bindText("inStop","stop");
+    bindNum("inEquity","equity",100,null);
+    bindNum("inRisk","riskPct",0.05,10);
+    bindNum("inRR","rr",0.2,20);
+    bindNum("inMaxTrades","maxTrades",1,20);
+    bindNum("inStopR","dailyStopR",0.5,20);
+    bindNum("inSizeMult","sizeMult",0.1,3);
+
+    render();
+    setInterval(render, 20000);
+
+    if(window.claude && window.claude.use){
+      window.claude.use("db").then(function(d){
+        if(!d) return;
+        db = d;
+        $("store").textContent = "synced";
+        d.doc("config/settings").get().then(function(snap){
+          if(snap.exists){
+            var v = snap.data();
+            for(var k in v) if(k in S && v[k] != null) S[k] = v[k];
+            $("inSymbol").value = S.symbol; $("inEquity").value = S.equity;
+            $("inRisk").value = S.riskPct; $("inRR").value = S.rr;
+            $("inMaxTrades").value = S.maxTrades; $("inStopR").value = S.dailyStopR;
+            $("inSizeMult").value = S.sizeMult;
+            render();
+          }
+        }).catch(function(){});
+        if(unsub) unsub();
+        unsub = d.collection("trades").orderBy("ts","desc").limit(100)
+          .onSnapshot(function(q){
+            S.trades = q.docs.map(function(doc){ return doc.data(); });
+            render();
+          }, function(){ $("store").textContent = "local only"; });
+      }).catch(function(){});
+    }
+  }
+
+  if(document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
+  else boot();
+})();
+</script>

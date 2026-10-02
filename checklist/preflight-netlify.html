@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="Tap the rules for your setup; the button unlocks when they're all met.">
+<meta name="theme-color" content="#EDF0F4" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0E1319" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Pre-Flight">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%231F4372'/%3E%3Cpath d='M16 33l10 10 22-24' fill='none' stroke='%233ECB92' stroke-width='8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%231F4372'/%3E%3Cpath d='M16 33l10 10 22-24' fill='none' stroke='%233ECB92' stroke-width='8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<title>Pre-Flight Desk</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&display=swap">
+<style>
+  :root{
+    --bg:#EDF0F4; --surface:#FFFFFF; --surface-2:#F4F7FA;
+    --ink:#131A23; --muted:#74859A;
+    --line:#D4DBE4; --line-strong:#B6C2D0;
+    --accent:#1F4372; --go:#0B7A55; --block:#A32E27;
+    --on-accent:#FFFFFF; --on-go:#FFFFFF;
+    --shadow:0 1px 2px rgba(19,26,35,.06), 0 8px 24px -16px rgba(19,26,35,.35);
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0E1319; --surface:#161D25; --surface-2:#1B232C;
+      --ink:#E8EEF5; --muted:#7C8DA1;
+      --line:#27313C; --line-strong:#3A4754;
+      --accent:#8FB4E6; --go:#3ECB92; --block:#F0817A;
+      --on-accent:#0E1319; --on-go:#07211A;
+      --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 26px -18px rgba(0,0,0,.9);
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0E1319; --surface:#161D25; --surface-2:#1B232C;
+    --ink:#E8EEF5; --muted:#7C8DA1;
+    --line:#27313C; --line-strong:#3A4754;
+    --accent:#8FB4E6; --go:#3ECB92; --block:#F0817A;
+    --on-accent:#0E1319; --on-go:#07211A;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 26px -18px rgba(0,0,0,.9);
+  }
+
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:"Archivo","Helvetica Neue",Helvetica,Arial,sans-serif;
+    font-size:16px; line-height:1.4; -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:520px; margin:0 auto; padding:18px 16px 104px}
+
+  h1{font-size:17px; font-weight:700; letter-spacing:-.01em; margin:0 0 12px}
+  h1 span{color:var(--muted); font-weight:500}
+
+  .picker{display:flex; gap:7px; overflow-x:auto; margin:0 -16px; padding:2px 16px 6px; scrollbar-width:none}
+  .picker::-webkit-scrollbar{display:none}
+  .chip{
+    flex:0 0 auto; border:1px solid var(--line-strong); background:var(--surface);
+    color:var(--muted); font:inherit; font-size:13.5px; font-weight:600;
+    padding:8px 14px; border-radius:99px; cursor:pointer; white-space:nowrap;
+  }
+  .chip[aria-pressed="true"]{background:var(--accent); border-color:var(--accent); color:var(--on-accent)}
+  .chip:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+
+  ul{
+    list-style:none; margin:16px 0 0; padding:0;
+    display:flex; flex-direction:column; gap:1px;
+    background:var(--line); border:1px solid var(--line);
+    border-radius:14px; overflow:hidden; box-shadow:var(--shadow);
+  }
+  .item{
+    display:grid; grid-template-columns:auto 1fr; gap:14px; align-items:center;
+    width:100%; text-align:left; font:inherit; color:var(--ink);
+    background:var(--surface); border:0; border-left:3px solid transparent;
+    padding:16px 16px 16px 13px; min-height:62px; cursor:pointer;
+  }
+  .item:hover{background:var(--surface-2)}
+  .item:focus-visible{outline:2px solid var(--accent); outline-offset:-2px}
+  .item[aria-pressed="true"]{border-left-color:var(--go)}
+  .item[aria-pressed="true"] .box{background:var(--go); border-color:var(--go)}
+  .item[aria-pressed="true"] .box svg{opacity:1}
+  .item[aria-pressed="true"] .txt{color:var(--muted)}
+  .box{
+    width:26px; height:26px; border-radius:8px; border:2px solid var(--line-strong);
+    background:var(--surface-2); display:grid; place-items:center; flex:0 0 auto;
+  }
+  .box svg{width:15px; height:15px; opacity:0; color:var(--on-go)}
+  .txt{font-size:16px; font-weight:600; line-height:1.3}
+
+  /* directional rows — bias instead of a plain tick */
+  .row{
+    display:grid; grid-template-columns:auto 1fr auto; gap:14px; align-items:center;
+    background:var(--surface); border-left:3px solid transparent;
+    padding:12px 12px 12px 13px; min-height:62px;
+  }
+  .row.set{border-left-color:var(--go)}
+  .row.set .box{background:var(--go); border-color:var(--go)}
+  .row.set .box svg{opacity:1}
+  .seg{display:flex; gap:6px}
+  .seg button{
+    font:inherit; font-size:13.5px; font-weight:700; letter-spacing:.02em;
+    border:1.5px solid var(--line-strong); background:var(--surface-2); color:var(--muted);
+    border-radius:9px; padding:9px 14px; cursor:pointer; min-width:62px;
+  }
+  .seg button:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+  .seg button[aria-pressed="true"].up{background:var(--go); border-color:var(--go); color:var(--on-go)}
+  .seg button[aria-pressed="true"].dn{background:var(--block); border-color:var(--block); color:var(--on-accent)}
+  .bias{
+    background:var(--surface-2); padding:13px 16px; font-size:14px; font-weight:700;
+    letter-spacing:.03em; text-transform:uppercase; color:var(--muted);
+  }
+  .bias b{font-weight:700}
+  .bias.long b{color:var(--go)} .bias.short b{color:var(--block)}
+
+  .foot{display:flex; justify-content:space-between; align-items:center; gap:12px; margin:12px 2px 0}
+  .count{font-size:13px; font-weight:600; color:var(--muted); letter-spacing:.02em}
+  .reset{background:none; border:0; font:inherit; font-size:13px; font-weight:600;
+         color:var(--accent); cursor:pointer; padding:4px 0; text-decoration:underline; text-underline-offset:3px}
+
+  .gate{
+    position:fixed; left:0; right:0; bottom:0;
+    padding:12px 16px calc(12px + env(safe-area-inset-bottom,0px));
+    background:color-mix(in srgb, var(--bg) 92%, transparent);
+    backdrop-filter:saturate(1.4) blur(10px); border-top:1px solid var(--line);
+  }
+  .gate-in{max-width:520px; margin:0 auto}
+  .go{
+    width:100%; border:0; border-radius:12px; padding:17px 16px; cursor:pointer;
+    font:inherit; font-size:17px; font-weight:700; background:var(--go); color:var(--on-go);
+  }
+  .go[disabled]{background:transparent; color:var(--muted); cursor:not-allowed;
+                box-shadow:inset 0 0 0 1px var(--line-strong)}
+  .go:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<style>
+  html{color-scheme:light dark; -webkit-text-size-adjust:100%}
+  body{padding-top:env(safe-area-inset-top,0px)}
+  [hidden]{display:none!important}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Pre-Flight <span>/ before you click buy</span></h1>
+  <div class="picker" id="picker"></div>
+  <ul id="list"></ul>
+  <div class="foot">
+    <span class="count" id="count"></span>
+    <button class="reset" id="reset" type="button">Clear</button>
+  </div>
+</div>
+
+<div class="gate"><div class="gate-in">
+  <button class="go" id="go" type="button" disabled>Not yet</button>
+</div></div>
+
+<script>
+(function(){
+  "use strict";
+
+  var ALWAYS = [
+    "No big release in the next 30 minutes",
+    "Not a revenge trade",
+    "Not past your loss limit for the day",
+    "Risk is 1% or less, worked out not felt"
+  ];
+
+  var SETUPS = [
+    {id:"fvg", name:"Top-down FVG", rules:[
+      {dir:"Daily trend"},
+      {dir:"4H trend"},
+      {dir:"1H trend"},
+      "HTF key level — price is in the 1H FVG",
+      "Liquidity sweep",
+      "CISD — shift in orderflow",
+      "FVG in discount",
+      "Risk to reward is 1:2 or better"
+    ]},
+    {id:"poc", name:"POC continuation", rules:[
+      "ES/MES or YM/MYM — not NQ",
+      "Prior RTH POC drawn on the 5m",
+      "Today opened clearly on one side of it",
+      "Price has come back to the POC",
+      "You're going through it, not fading it",
+      "Stop 0.25 × ATR beyond, target 3R, no breakeven move",
+      "Stop and target resting in the platform",
+      "Before 15:00 ET, flat by 15:55"
+    ]},
+    {id:"nq", name:"NQ POC retest", rules:[
+      "NQ or MNQ, 5m, 4-point rows",
+      "A candle has closed through the POC",
+      "Price has come back to it since",
+      "Stop 0.25 × ATR beyond, target 3R",
+      "Half size — this one is still research",
+      "Stop and target resting in the platform",
+      "Before 15:00 ET, flat by 15:55"
+    ]},
+    {id:"midnight", name:"Midnight open", rules:[
+      "Midnight open marked, 09:30–09:45 range drawn",
+      "Bias runs from the 09:30 open toward midnight",
+      "Distance to it is under 0.5 × ATR",
+      "A 5m candle closed through the range that way",
+      "Stop beyond the signal candle, target the midnight open",
+      "Risk under $200",
+      "Before 10:30 ET"
+    ]},
+    {id:"asia", name:"Asia → midnight", invert:true, rules:[
+      {dir:"Asia pushed"},
+      "Midnight open (00:00 ET) is marked",
+      "Asia pushed away from it and is turning back",
+      "Distance back to midnight: 20+ points, under 0.5 × ATR",
+      "It's past 05:00 ET — you're not fading the 00:05 push",
+      "A completed 5m candle has turned back toward midnight",
+      "Stop 0.1 × ATR beyond the Asia extreme, $200 max",
+      "Target is the midnight open, flat by 09:25",
+      "Half size — this one failed its holdout"
+    ]},
+    {id:"poclq", name:"POC + liquidity", rules:[
+      "4H event is under 12 hours old",
+      "Monthly, weekly and daily bias agree",
+      "POC and the liquidity pools are drawn",
+      "Stop one tick beyond the safe swing",
+      "Target 1.5R or better at visible liquidity",
+      "No trailing the stop",
+      "Closed by 16:00 ET"
+    ]},
+    {id:"other", name:"Anything else", rules:[
+      "You can name the setup out loud",
+      "The level was marked before price got there",
+      "Entry, stop and target defined right now",
+      "Reward is at least 2× the risk",
+      "Stop and target resting in the platform",
+      "You know when you'll be flat"
+    ]}
+  ];
+
+  var KEY = "preflight.simple";
+  var state = {id:"fvg", ticks:{}, dirs:{}, day:""};
+
+  function today(){
+    try{
+      return new Intl.DateTimeFormat("en-CA",{timeZone:"America/New_York"}).format(new Date());
+    }catch(e){ return String(new Date().toDateString()); }
+  }
+  function load(){
+    try{
+      var v = JSON.parse(localStorage.getItem(KEY)||"{}");
+      if(v.id) state.id = v.id;
+      if(v.day === today()){
+        if(v.ticks) state.ticks = v.ticks;
+        if(v.dirs) state.dirs = v.dirs;
+      }
+    }catch(e){}
+  }
+  function save(){
+    state.day = today();
+    try{ localStorage.setItem(KEY, JSON.stringify(state)); }catch(e){}
+  }
+
+  function setup(){
+    for(var i=0;i<SETUPS.length;i++) if(SETUPS[i].id === state.id) return SETUPS[i];
+    return SETUPS[0];
+  }
+  function rules(){ return ALWAYS.concat(setup().rules); }
+  function esc(s){ return String(s).replace(/[&<>"]/g,function(c){
+    return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]; }); }
+  function tick(i){ return !!state.ticks[state.id + "|" + i]; }
+  function dir(i){ return state.dirs[state.id + "|" + i] || ""; }
+
+  var check = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 8.5l3.5 3.5 7.5-8" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+  function biasRow(longs, shorts, n, invert){
+    if(longs + shorts < n){
+      return '<li><div class="bias">'+(n > 1 ? "Set all " + n : "Pick a side")+'</div></li>';
+    }
+    var win = longs > shorts ? "long" : "short";
+    if(invert){
+      var trade = win === "long" ? "short" : "long";
+      return '<li><div class="bias '+trade+'">Trade back <b>'+trade+'</b> to midnight</div></li>';
+    }
+    var k = Math.max(longs, shorts);
+    return '<li><div class="bias '+win+'">'+
+           (k === n ? "Aligned " : "Majority ") + '<b>'+win+'</b> · '+k+' of '+n+'</div></li>';
+  }
+
+  function render(){
+    document.getElementById("picker").innerHTML = SETUPS.map(function(s){
+      return '<button class="chip" type="button" data-setup="'+s.id+'" aria-pressed="'+
+             (s.id===state.id)+'">'+esc(s.name)+'</button>';
+    }).join("");
+
+    var r = rules(), done = 0, lastDir = -1, nDir = 0, longs = 0, shorts = 0;
+    for(var j=0;j<r.length;j++) if(r[j] && r[j].dir){ lastDir = j; nDir++; }
+    var invert = !!setup().invert;
+
+    var html = r.map(function(rule,i){
+      if(rule && rule.dir){
+        var d = dir(i);
+        if(d){ done++; if(d === "long") longs++; else shorts++; }
+        var row = '<li><div class="row'+(d?" set":"")+'">'+
+          '<span class="box">'+check+'</span><span class="txt">'+esc(rule.dir)+'</span>'+
+          '<span class="seg">'+
+            '<button class="up" type="button" data-dir="long" data-i="'+i+'" aria-pressed="'+(d==="long")+'">Bull</button>'+
+            '<button class="dn" type="button" data-dir="short" data-i="'+i+'" aria-pressed="'+(d==="short")+'">Bear</button>'+
+          '</span></div></li>';
+        if(i === lastDir) row += biasRow(longs, shorts, nDir, invert);
+        return row;
+      }
+      var on = tick(i); if(on) done++;
+      return '<li><button class="item" type="button" data-i="'+i+'" aria-pressed="'+on+'">'+
+             '<span class="box">'+check+'</span><span class="txt">'+esc(rule)+'</span></button></li>';
+    }).join("");
+    document.getElementById("list").innerHTML = html;
+
+    var left = r.length - done;
+    document.getElementById("count").textContent = done + " of " + r.length + " checked";
+    var go = document.getElementById("go");
+    go.disabled = left > 0;
+    go.textContent = left > 0 ? (left + " left") : "Good to go";
+    save();
+  }
+
+  document.addEventListener("click", function(ev){
+    var el = ev.target.closest("[data-setup]");
+    if(el){ state.id = el.getAttribute("data-setup"); render(); return; }
+
+    el = ev.target.closest("[data-dir]");
+    if(el){
+      var dk = state.id + "|" + el.getAttribute("data-i"), d = el.getAttribute("data-dir");
+      if(state.dirs[dk] === d) delete state.dirs[dk]; else state.dirs[dk] = d;
+      render(); return;
+    }
+
+    el = ev.target.closest("[data-i]");
+    if(el){
+      var k = state.id + "|" + el.getAttribute("data-i");
+      if(state.ticks[k]) delete state.ticks[k]; else state.ticks[k] = 1;
+      render(); return;
+    }
+
+    if(ev.target.id === "reset"){ state.ticks = {}; state.dirs = {}; render(); return; }
+
+    if(ev.target.id === "go"){
+      state.ticks = {}; state.dirs = {}; render();
+      window.scrollTo({top:0, behavior:"smooth"});
+      return;
+    }
+  });
+
+  load();
+  render();
+})();
+</script>
+</body>
+</html>

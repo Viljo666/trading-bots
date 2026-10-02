@@ -27,12 +27,12 @@ import pandas as pd
 import pytz
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
+from alpaca.data.enums import Adjustment
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 import config
 import indicators
 import scanner
-from risk import size_trade
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s",
                     handlers=[logging.StreamHandler(sys.stdout)])
@@ -52,6 +52,7 @@ ATR_PERIOD = 14
 ATR_STOP_MULT = 2.5     # initial + trailing stop distance
 MAX_POSITIONS = 5
 RISK_PCT = 0.01
+SLIPPAGE_BPS = 5       # conservative 0.05% each way on shadow fills
 
 
 @dataclass
@@ -109,7 +110,8 @@ def _fetch_daily(client, symbols: list[str], start, end, chunk=100) -> dict[str,
         try:
             req = StockBarsRequest(symbol_or_symbols=batch,
                                    timeframe=TimeFrame(1, TimeFrameUnit.Day),
-                                   start=start, end=end)
+                                   start=start, end=end,
+                                   adjustment=Adjustment.ALL)
             df = client.get_stock_bars(req).df
         except Exception as e:
             log.warning("fetch %d failed: %s", i, e)
@@ -154,43 +156,87 @@ def run_momentum(daily: dict[str, pd.DataFrame], universe: list[str],
     equity = 100_000.0
     cash = equity
     positions: dict[str, SwingPos] = {}
+    pending: list[tuple[float, str, float]] = []  # RS, symbol, ATR at signal close
     trades = wins = 0
     curve: list[float] = []
 
+    def close_pos(sym: str, px: float) -> None:
+        nonlocal cash, trades, wins
+        pos = positions.pop(sym)
+        px *= 1.0 - SLIPPAGE_BPS / 10_000.0
+        cash += pos.qty * px
+        pnl = (px - pos.entry) * pos.qty
+        trades += 1
+        wins += int(pnl > 0)
+
     for i, d in enumerate(sim_dates):
-        # --- mark + manage exits using day d's bars ---
-        for sym in list(positions.keys()):
+        sizing_equity = curve[-1] if curve else equity
+
+        # Existing positions that gap through their stop exit at today's open.
+        for sym in list(positions):
+            f = feats.get(sym)
+            if f is None or d not in f.index:
+                continue
+            row = f.loc[d]
+            if float(row["open"]) <= positions[sym].stop:
+                close_pos(sym, float(row["open"]))
+
+        # Yesterday's signals fill at TODAY'S open. The previous implementation
+        # filled tomorrow's open one loop early and marked it against yesterday's
+        # close, introducing look-ahead and a one-day valuation mismatch.
+        for _rs, sym, signal_atr in pending:
+            if len(positions) >= MAX_POSITIONS or sym in positions:
+                continue
+            f = feats.get(sym)
+            if f is None or d not in f.index:
+                continue
+            entry = float(f.loc[d]["open"]) * (1.0 + SLIPPAGE_BPS / 10_000.0)
+            stop = entry - ATR_STOP_MULT * signal_atr
+            risk_per_share = entry - stop
+            if entry <= 0 or risk_per_share <= 0:
+                continue
+            qty_risk = int((sizing_equity * RISK_PCT) // risk_per_share)
+            qty_cap = int((sizing_equity * 0.25) // entry)
+            qty_cash = int(cash // entry)
+            qty = min(qty_risk, qty_cap, qty_cash)
+            if qty <= 0:
+                continue
+            cash -= qty * entry
+            positions[sym] = SwingPos(sym, qty, entry, d, stop, entry)
+        pending = []
+
+        # Intraday stops, close-based trend exits, and trailing-stop updates.
+        for sym in list(positions):
             f = feats.get(sym)
             if f is None or d not in f.index:
                 continue
             row = f.loc[d]
             pos = positions[sym]
-            o, h, l, c = float(row["open"]), float(row["high"]), float(row["low"]), float(row["close"])
-            exit_px = None
-            # gap-aware stop
-            if o <= pos.stop:
-                exit_px = o
-            elif l <= pos.stop:
-                exit_px = pos.stop
-            elif not np.isnan(row["sma_break"]) and c < float(row["sma_break"]):
-                exit_px = c  # trend break -> exit on close
-            if exit_px is not None:
-                cash += pos.qty * exit_px
-                pnl = (exit_px - pos.entry) * pos.qty
-                trades += 1
-                wins += 1 if pnl > 0 else 0
-                positions.pop(sym)
-            else:
-                # trail the stop up
-                pos.highest_close = max(pos.highest_close, c)
-                if not np.isnan(row["atr"]):
-                    pos.stop = max(pos.stop, pos.highest_close - ATR_STOP_MULT * float(row["atr"]))
+            low, close = float(row["low"]), float(row["close"])
+            if low <= pos.stop:
+                close_pos(sym, pos.stop)
+                continue
+            if not np.isnan(row["sma_break"]) and close < float(row["sma_break"]):
+                close_pos(sym, close)
+                continue
+            pos.highest_close = max(pos.highest_close, close)
+            if not np.isnan(row["atr"]):
+                pos.stop = max(pos.stop, pos.highest_close - ATR_STOP_MULT * float(row["atr"]))
 
-        # --- entries: rank eligible names, fill at NEXT day's open ---
-        if len(positions) < MAX_POSITIONS and i + 1 < len(sim_dates):
+        # Mark the portfolio using today's close.
+        equity = cash
+        for sym, pos in positions.items():
+            f = feats.get(sym)
+            px = float(f.loc[d]["close"]) if f is not None and d in f.index else pos.entry
+            equity += pos.qty * px
+        curve.append(equity)
+
+        # Generate signals after today's close; queue them for next session's open.
+        slots = MAX_POSITIONS - len(positions)
+        if slots > 0 and i + 1 < len(sim_dates):
             nxt = sim_dates[i + 1]
             spy_rs_d = float(spy_rs.loc[d]) if d in spy_rs.index and not np.isnan(spy_rs.loc[d]) else 0.0
-            cands = []
+            cands: list[tuple[float, str, float]] = []
             for sym in universe:
                 if sym in positions or sym == "SPY":
                     continue
@@ -198,54 +244,32 @@ def run_momentum(daily: dict[str, pd.DataFrame], universe: list[str],
                 if f is None or d not in f.index or nxt not in f.index:
                     continue
                 row = f.loc[d]
-                if np.isnan(row["sma_trend"]) or np.isnan(row["atr"]) or row["atr"] <= 0:
+                if np.isnan(row["sma_trend"]) or np.isnan(row["atr"]) or float(row["atr"]) <= 0:
                     continue
-                c = float(row["close"])
-                # rising trend SMA
                 idx = f.index.get_loc(d)
                 if idx < 10:
                     continue
                 sma_then = float(f["sma_trend"].iloc[idx - 10])
                 if np.isnan(sma_then):
                     continue
-                price_above = c > float(row["sma_trend"])
-                rising = float(row["sma_trend"]) > sma_then
-                near_high = c >= float(row["hi_n"]) * (1 - NEAR_HIGH_PCT / 100.0)
-                rs = float(row["ret_rs"]) if not np.isnan(row["ret_rs"]) else -1
-                stronger = rs > spy_rs_d
-                if price_above and rising and near_high and stronger:
-                    cands.append((rs, sym, c, float(row["atr"])))
-            cands.sort(reverse=True)  # strongest RS first
-            for rs, sym, c, a in cands:
-                if len(positions) >= MAX_POSITIONS:
-                    break
-                entry = float(feats[sym].loc[nxt]["open"])
-                stop = entry - ATR_STOP_MULT * a
-                t = size_trade(sym, "buy", entry, stop, entry + a, equity=cash)
-                if t is None or t.qty <= 0:
-                    continue
-                cost = t.qty * entry
-                if cost > cash:
-                    continue
-                cash -= cost
-                positions[sym] = SwingPos(sym, t.qty, entry, nxt, stop, entry)
-
-        # --- mark-to-market equity at day d close ---
-        mtm = cash
-        for sym, pos in positions.items():
-            f = feats.get(sym)
-            if f is not None and d in f.index:
-                mtm += pos.qty * float(f.loc[d]["close"])
-            else:
-                mtm += pos.qty * pos.entry
-        equity = mtm
-        curve.append(equity)
+                close = float(row["close"])
+                rs = float(row["ret_rs"]) if not np.isnan(row["ret_rs"]) else -1.0
+                eligible = (
+                    close > float(row["sma_trend"])
+                    and float(row["sma_trend"]) > sma_then
+                    and close >= float(row["hi_n"]) * (1 - NEAR_HIGH_PCT / 100.0)
+                    and rs > spy_rs_d
+                )
+                if eligible:
+                    cands.append((rs, sym, float(row["atr"])))
+            pending = sorted(cands, reverse=True)[:slots]
 
     # liquidate remainder at last close
     last = sim_dates[-1]
     for sym, pos in positions.items():
         f = feats.get(sym)
         px = float(f.loc[last]["close"]) if (f is not None and last in f.index) else pos.entry
+        px *= 1.0 - SLIPPAGE_BPS / 10_000.0
         cash += pos.qty * px
         pnl = (px - pos.entry) * pos.qty
         trades += 1

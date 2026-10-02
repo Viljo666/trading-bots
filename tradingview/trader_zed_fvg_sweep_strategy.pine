@@ -1,0 +1,756 @@
+//@version=6
+strategy("Trader Zed Top-Down FVG Checklist + Trade Box [Research]", "Top-Down FVG Checklist",
+     overlay = true, pyramiding = 0, initial_capital = 50000,
+     default_qty_type = strategy.fixed, default_qty_value = 1,
+     commission_type = strategy.commission.cash_per_contract,
+     commission_value = 1.25, slippage = 1,
+     calc_on_order_fills = true, process_orders_on_close = false,
+     max_boxes_count = 300, max_labels_count = 300)
+
+// Objective translation of the five-step checklist shown in the reference:
+//   1. A completed higher-timeframe three-candle FVG supplies the key zone.
+//   2. On the entry chart, price enters that zone and sweeps/reclaims a confirmed pivot.
+//   3. A completed entry-timeframe candle closes through the opposite pivot (CISD/MSS).
+//   4. Displacement creates a new FVG in discount for longs / premium for shorts.
+//   5. Enter on a retracement into that FVG; stop beyond the sweep; target >= 2R.
+// Daily, 4H, and 1H confirmed structure define bias. Entries execute on 5m/15m.
+// Higher-timeframe values use completed candles only (no lookahead).
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inputs
+// ─────────────────────────────────────────────────────────────────────────────
+
+string GROUP_STRUCTURE = "1. Structure"
+string GROUP_ENTRY = "2. Entry"
+string GROUP_RISK = "3. Risk"
+string GROUP_SESSION = "4. Session"
+string GROUP_DISPLAY = "5. Display and alerts"
+string NY_TZ = "America/New_York"
+
+string biasAlignment = input.string("Context only", "D / 4H / 1H bias use",
+     options = ["Context only", "Require 2 of 3", "Require all 3", "Off"], group = GROUP_STRUCTURE,
+     tooltip = "Context only shows counter-bias setups with a warning. Require modes block them.")
+int biasPivotLength = input.int(2, "Bias swing strength", minval = 1, maxval = 10, group = GROUP_STRUCTURE)
+string htf = input.timeframe("60", "Key-level FVG timeframe", group = GROUP_STRUCTURE,
+     tooltip = "The reference setup uses a 1-hour FVG. D/4H/1H structure is checked separately.")
+int pivotLength = input.int(2, "Entry-timeframe pivot strength", minval = 1, maxval = 10, group = GROUP_STRUCTURE,
+     tooltip = "A pivot needs this many completed candles on both sides.")
+int maxSetupBars = input.int(48, "Maximum bars from sweep to entry", minval = 3, maxval = 288, group = GROUP_STRUCTURE)
+bool invalidateHtfOnClose = input.bool(true, "Invalidate HTF FVG on close through far edge", group = GROUP_STRUCTURE)
+
+string entryDepth = input.string("50%", "Entry FVG limit", options = ["Near edge", "50%", "Far edge"], group = GROUP_ENTRY)
+bool requireDiscount = input.bool(true, "Require FVG in discount/premium", group = GROUP_ENTRY)
+float minimumFvgPoints = input.float(0.25, "Minimum entry FVG size (points)", minval = 0.0, step = 0.25, group = GROUP_ENTRY)
+int maxLimitWaitBars = input.int(12, "Cancel unfilled limit after bars", minval = 1, maxval = 100, group = GROUP_ENTRY)
+
+int contracts = input.int(1, "Contracts", minval = 1, maxval = 20, group = GROUP_RISK)
+float rewardRisk = input.float(2.0, "Target reward/risk", minval = 2.0, maxval = 10.0, step = 0.25, group = GROUP_RISK)
+int stopBufferTicks = input.int(2, "Stop beyond sweep (ticks)", minval = 0, maxval = 20, group = GROUP_RISK)
+float maximumRiskDollars = input.float(200.0, "Maximum planned risk ($)", minval = 1.0, step = 5.0, group = GROUP_RISK)
+float pointValuePerContract = input.float(2.0, "Dollars per point per contract", minval = 0.01, step = 0.25, group = GROUP_RISK,
+     tooltip = "MNQ = $2, NQ = $20, MES = $5, ES = $50 per point.")
+float minimumStopPoints = input.float(1.0, "Minimum stop distance (points)", minval = 0.0, step = 0.25, group = GROUP_RISK)
+
+string entrySession = input.session("0000-1600:12345", "Allowed entry session (New York)", group = GROUP_SESSION)
+string flattenTime = input.string("15:55", "Force flat", options = ["None", "11:00", "12:00", "15:55"], group = GROUP_SESSION)
+int maximumTradesPerDay = input.int(1, "Maximum filled trades per day", minval = 1, maxval = 5, group = GROUP_SESSION)
+int backtestStart = input.time(timestamp("01 Jan 2024 00:00 +0000"), "Backtest start", group = GROUP_SESSION)
+int backtestEnd = input.time(timestamp("31 Dec 2099 23:59 +0000"), "Backtest end", group = GROUP_SESSION)
+
+bool showHtfZones = input.bool(true, "Show higher-timeframe FVG zones", group = GROUP_DISPLAY)
+bool showLtfZone = input.bool(true, "Show entry FVG", group = GROUP_DISPLAY)
+bool showPositionBoxes = input.bool(true, "Show risk/reward setup boxes", group = GROUP_DISPLAY)
+bool showSetupLabels = input.bool(true, "Show entry/stop/target label", group = GROUP_DISPLAY)
+int minimumBoxBars = input.int(12, "Minimum setup-box width (bars)", minval = 2, maxval = 100, group = GROUP_DISPLAY)
+bool showSignals = input.bool(true, "Show sweep / CISD markers", group = GROUP_DISPLAY)
+bool showDashboard = input.bool(true, "Show compact dashboard", group = GROUP_DISPLAY)
+bool showDashboardStats = input.bool(false, "Show performance rows in dashboard", group = GROUP_DISPLAY,
+     tooltip = "Leave this off for a smaller phone-friendly checklist. Full results remain in Strategy Tester.")
+string dashboardLocation = input.string("Bottom right", "Dashboard location",
+     options = ["Top left", "Top right", "Bottom left", "Bottom right"], group = GROUP_DISPLAY)
+
+bool isFiveMinuteChart = timeframe.isminutes and timeframe.multiplier == 5
+bool isFifteenMinuteChart = timeframe.isminutes and timeframe.multiplier == 15
+bool validChart = isFiveMinuteChart or isFifteenMinuteChart
+string entryTimeframeText = isFiveMinuteChart ? "5m" : isFifteenMinuteChart ? "15m" : timeframe.period
+string higherTimeframeText = htf == "60" ? "1H" : htf == "240" ? "4H" : htf
+bool inEntrySession = not na(time(timeframe.period, entrySession, NY_TZ))
+bool inDateRange = time >= backtestStart and time <= backtestEnd
+float tickSize = syminfo.mintick
+
+f_dateKey(int value) =>
+    year(value, NY_TZ) * 10000 + month(value, NY_TZ) * 100 + dayofmonth(value, NY_TZ)
+
+f_barReachesClock(string value, int barOpenTime, int barCloseTime) =>
+    int targetHour = int(str.tonumber(str.substring(value, 0, 2)))
+    int targetMinute = int(str.tonumber(str.substring(value, 3, 5)))
+    int targetTime = timestamp(NY_TZ, year(barOpenTime, NY_TZ), month(barOpenTime, NY_TZ),
+         dayofmonth(barOpenTime, NY_TZ), targetHour, targetMinute)
+    barOpenTime < targetTime and barCloseTime >= targetTime
+
+// Latest confirmed break of a confirmed swing. The [1] return means only the
+// last fully closed D/4H/1H candle contributes to the lower-timeframe signal.
+f_confirmedStructureBias(int length) =>
+    float pivotHigh = ta.pivothigh(high, length, length)
+    float pivotLow = ta.pivotlow(low, length, length)
+    float latestHigh = ta.valuewhen(not na(pivotHigh), pivotHigh, 0)
+    float latestLow = ta.valuewhen(not na(pivotLow), pivotLow, 0)
+    bool bullBreak = not na(latestHigh) and close > latestHigh and close[1] <= latestHigh
+    bool bearBreak = not na(latestLow) and close < latestLow and close[1] >= latestLow
+    int breakDirection = bullBreak ? 1 : bearBreak ? -1 : 0
+    int persistentBias = nz(ta.valuewhen(breakDirection != 0, breakDirection, 0), 0)
+    persistentBias[1]
+
+int dailyBias = request.security(syminfo.tickerid, "1D", f_confirmedStructureBias(biasPivotLength),
+     lookahead = barmerge.lookahead_on)
+int fourHourBias = request.security(syminfo.tickerid, "240", f_confirmedStructureBias(biasPivotLength),
+     lookahead = barmerge.lookahead_on)
+int oneHourBias = request.security(syminfo.tickerid, "60", f_confirmedStructureBias(biasPivotLength),
+     lookahead = barmerge.lookahead_on)
+int bullBiasVotes = (dailyBias == 1 ? 1 : 0) + (fourHourBias == 1 ? 1 : 0) + (oneHourBias == 1 ? 1 : 0)
+int bearBiasVotes = (dailyBias == -1 ? 1 : 0) + (fourHourBias == -1 ? 1 : 0) + (oneHourBias == -1 ? 1 : 0)
+int requiredBiasVotes = biasAlignment == "Require all 3" ? 3 : 2
+int topDownBias = biasAlignment == "Off" ? 0 :
+     bullBiasVotes >= requiredBiasVotes ? 1 : bearBiasVotes >= requiredBiasVotes ? -1 : 0
+bool biasFilterRequired = biasAlignment == "Require 2 of 3" or biasAlignment == "Require all 3"
+bool biasAllowsLong = not biasFilterRequired or topDownBias == 1
+bool biasAllowsShort = not biasFilterRequired or topDownBias == -1
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Step 1: completed higher-timeframe fair-value gaps
+// ─────────────────────────────────────────────────────────────────────────────
+
+// At the start of each new HTF candle, [1] is the most recently completed HTF
+// candle.  A bullish FVG lies between high[3] and low[1]; bearish is mirrored.
+[htfClosedTime, completedBullFvg, completedBullTop, completedBullBottom,
+ completedBearFvg, completedBearTop, completedBearBottom] = request.security(
+     syminfo.tickerid, htf,
+     [time_close[1], low[1] > high[3], low[1], high[3],
+      high[1] < low[3], low[3], high[1]],
+     lookahead = barmerge.lookahead_on)
+
+bool newCompletedHtfBar = ta.change(htfClosedTime) != 0
+var float bullHtfTop = na
+var float bullHtfBottom = na
+var float bearHtfTop = na
+var float bearHtfBottom = na
+var box bullHtfBox = na
+var box bearHtfBox = na
+
+if newCompletedHtfBar and completedBullFvg
+    bullHtfTop := completedBullTop
+    bullHtfBottom := completedBullBottom
+    if not na(bullHtfBox)
+        box.delete(bullHtfBox)
+    bullHtfBox := showHtfZones ? box.new(bar_index, bullHtfTop, bar_index + 1, bullHtfBottom,
+         bgcolor = color.new(color.teal, 82), border_color = color.new(color.teal, 25), extend = extend.right) : na
+
+if newCompletedHtfBar and completedBearFvg
+    bearHtfTop := completedBearTop
+    bearHtfBottom := completedBearBottom
+    if not na(bearHtfBox)
+        box.delete(bearHtfBox)
+    bearHtfBox := showHtfZones ? box.new(bar_index, bearHtfTop, bar_index + 1, bearHtfBottom,
+         bgcolor = color.new(color.maroon, 82), border_color = color.new(color.red, 25), extend = extend.right) : na
+
+bool bullHtfInvalid = invalidateHtfOnClose and not na(bullHtfBottom) and close < bullHtfBottom
+bool bearHtfInvalid = invalidateHtfOnClose and not na(bearHtfTop) and close > bearHtfTop
+if bullHtfInvalid
+    bullHtfTop := na
+    bullHtfBottom := na
+    if not na(bullHtfBox)
+        box.delete(bullHtfBox)
+        bullHtfBox := na
+if bearHtfInvalid
+    bearHtfTop := na
+    bearHtfBottom := na
+    if not na(bearHtfBox)
+        box.delete(bearHtfBox)
+        bearHtfBox := na
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Confirmed lower-timeframe pivots
+// ─────────────────────────────────────────────────────────────────────────────
+
+float confirmedPivotLow = ta.pivotlow(low, pivotLength, pivotLength)
+float confirmedPivotHigh = ta.pivothigh(high, pivotLength, pivotLength)
+var float lastPivotLow = na
+var float lastPivotHigh = na
+if not na(confirmedPivotLow)
+    lastPivotLow := confirmedPivotLow
+if not na(confirmedPivotHigh)
+    lastPivotHigh := confirmedPivotHigh
+
+// state: 0 scanning, 1 sweep found / waiting CISD, 2 waiting discount FVG,
+// 3 limit order working, 4 position open, 5 locked for the current day.
+var int state = 0
+var int setupDirection = 0
+var int setupStartBar = na
+var int orderPlacedBar = na
+var float sweepExtreme = na
+var float shiftLevel = na
+var float impulseHigh = na
+var float impulseLow = na
+var float planEntry = na
+var float planStop = na
+var float planTarget = na
+var float planRiskPoints = na
+var float planRiskDollars = na
+var float entryFvgTop = na
+var float entryFvgBottom = na
+var box entryFvgBox = na
+var box activeRiskBox = na
+var box activeRewardBox = na
+var label activeSetupLabel = na
+var int tradesToday = 0
+var int currentDate = na
+var bool currentTradeCounted = false
+var bool planTradable = false
+var int checklistDirection = 0
+var bool checklistInHtfZone = false
+var bool checklistSweep = false
+var bool checklistBos = false
+var bool checklistLtfFvg = false
+var bool checklistDiscount = false
+var bool checklistDiscountEvaluated = false
+var bool checklistRisk = false
+var bool checklistRiskEvaluated = false
+
+bool bullSweepEvent = false
+bool bearSweepEvent = false
+bool bullShiftEvent = false
+bool bearShiftEvent = false
+bool fvgPlanEvent = false
+bool tradeReadyEvent = false
+bool filteredRiskEvent = false
+
+int today = f_dateKey(time)
+bool newTradingDay = na(currentDate) or today != currentDate
+if newTradingDay
+    currentDate := today
+    tradesToday := 0
+    if strategy.position_size == 0
+        strategy.cancel("Long")
+        strategy.cancel("Short")
+        state := 0
+        setupDirection := 0
+        planEntry := na
+        planStop := na
+        planTarget := na
+        planRiskPoints := na
+        planRiskDollars := na
+        currentTradeCounted := false
+        planTradable := false
+        checklistDirection := 0
+        checklistInHtfZone := false
+        checklistSweep := false
+        checklistBos := false
+        checklistLtfFvg := false
+        checklistDiscount := false
+        checklistDiscountEvaluated := false
+        checklistRisk := false
+        checklistRiskEvaluated := false
+        if not na(entryFvgBox)
+            box.delete(entryFvgBox)
+            entryFvgBox := na
+        if not na(activeRiskBox)
+            box.delete(activeRiskBox)
+            activeRiskBox := na
+        if not na(activeRewardBox)
+            box.delete(activeRewardBox)
+            activeRewardBox := na
+        if not na(activeSetupLabel)
+            label.delete(activeSetupLabel)
+            activeSetupLabel := na
+
+bool flatNow = flattenTime != "None" and f_barReachesClock(flattenTime, time, time_close)
+if flatNow
+    strategy.cancel("Long")
+    strategy.cancel("Short")
+    if strategy.position_size != 0
+        strategy.close_all(comment = "Session close", immediately = true,
+             alert_message = "HTF FVG strategy: forced session exit")
+    state := 5
+    planTradable := false
+    if not na(entryFvgBox)
+        box.set_right(entryFvgBox, math.max(box.get_right(entryFvgBox), bar_index + 1))
+        entryFvgBox := na
+    if strategy.position_size == 0
+        if not na(activeRiskBox)
+            box.set_right(activeRiskBox, math.max(box.get_right(activeRiskBox), bar_index + 1))
+            activeRiskBox := na
+        if not na(activeRewardBox)
+            box.set_right(activeRewardBox, math.max(box.get_right(activeRewardBox), bar_index + 1))
+            activeRewardBox := na
+        if not na(activeSetupLabel)
+            activeSetupLabel := na
+
+bool strategyTradeAllowed = tradesToday < maximumTradesPerDay
+bool canFindSetup = validChart and inDateRange and barstate.isconfirmed and inEntrySession and
+     strategy.position_size == 0 and state == 0
+bool overlapsBullHtf = not na(bullHtfTop) and low <= bullHtfTop and high >= bullHtfBottom
+bool overlapsBearHtf = not na(bearHtfTop) and high >= bearHtfBottom and low <= bearHtfTop
+
+if canFindSetup and (overlapsBullHtf or overlapsBearHtf)
+    checklistInHtfZone := true
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Step 2: sweep and reclaim a confirmed pivot inside the HTF FVG
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool bullishSweep = canFindSetup and biasAllowsLong and overlapsBullHtf and not na(lastPivotLow) and
+     not na(lastPivotHigh) and low < lastPivotLow and close > lastPivotLow
+bool bearishSweep = canFindSetup and biasAllowsShort and overlapsBearHtf and not na(lastPivotHigh) and
+     not na(lastPivotLow) and high > lastPivotHigh and close < lastPivotHigh
+
+if bullishSweep
+    state := 1
+    setupDirection := 1
+    setupStartBar := bar_index
+    sweepExtreme := low
+    shiftLevel := lastPivotHigh
+    impulseHigh := high
+    impulseLow := low
+    checklistDirection := 1
+    checklistInHtfZone := true
+    checklistSweep := true
+    bullSweepEvent := true
+else if bearishSweep
+    state := 1
+    setupDirection := -1
+    setupStartBar := bar_index
+    sweepExtreme := high
+    shiftLevel := lastPivotLow
+    impulseHigh := high
+    impulseLow := low
+    checklistDirection := -1
+    checklistInHtfZone := true
+    checklistSweep := true
+    bearSweepEvent := true
+
+if state >= 1 and state <= 2
+    impulseHigh := na(impulseHigh) ? high : math.max(impulseHigh, high)
+    impulseLow := na(impulseLow) ? low : math.min(impulseLow, low)
+
+// Cancel a developing setup if it takes too long or its HTF zone fails.
+bool setupExpired = state >= 1 and state <= 3 and not na(setupStartBar) and bar_index - setupStartBar > maxSetupBars
+bool setupHtfFailed = state >= 1 and ((setupDirection == 1 and bullHtfInvalid) or
+     (setupDirection == -1 and bearHtfInvalid))
+bool setupBiasFailed = state >= 1 and biasFilterRequired and
+     ((setupDirection == 1 and not biasAllowsLong) or (setupDirection == -1 and not biasAllowsShort))
+if (setupExpired or setupHtfFailed or setupBiasFailed) and strategy.position_size == 0
+    strategy.cancel("Long")
+    strategy.cancel("Short")
+    state := 0
+    setupDirection := 0
+    planEntry := na
+    planStop := na
+    planTarget := na
+    planRiskPoints := na
+    planRiskDollars := na
+    planTradable := false
+    checklistDirection := 0
+    checklistInHtfZone := false
+    checklistSweep := false
+    checklistBos := false
+    checklistLtfFvg := false
+    checklistDiscount := false
+    checklistDiscountEvaluated := false
+    checklistRisk := false
+    checklistRiskEvaluated := false
+    if not na(entryFvgBox)
+        box.set_right(entryFvgBox, math.max(box.get_right(entryFvgBox), bar_index + 1))
+        entryFvgBox := na
+    if not na(activeRiskBox)
+        box.set_right(activeRiskBox, math.max(box.get_right(activeRiskBox), bar_index + 1))
+        activeRiskBox := na
+    if not na(activeRewardBox)
+        box.set_right(activeRewardBox, math.max(box.get_right(activeRewardBox), bar_index + 1))
+        activeRewardBox := na
+    if not na(activeSetupLabel)
+        activeSetupLabel := na
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Step 3: CISD / market-structure shift on a completed candle
+// ─────────────────────────────────────────────────────────────────────────────
+
+if state == 1 and barstate.isconfirmed
+    if setupDirection == 1 and close > shiftLevel
+        state := 2
+        checklistBos := true
+        bullShiftEvent := true
+    else if setupDirection == -1 and close < shiftLevel
+        state := 2
+        checklistBos := true
+        bearShiftEvent := true
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Step 4: new entry-timeframe FVG in discount / premium
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool newBullLtfFvg = bar_index >= 2 and low > high[2] and low - high[2] >= minimumFvgPoints
+bool newBearLtfFvg = bar_index >= 2 and high < low[2] and low[2] - high >= minimumFvgPoints
+
+if state == 2 and barstate.isconfirmed
+    float candidateTop = na
+    float candidateBottom = na
+    float candidateEntry = na
+    bool locationOkay = false
+    if setupDirection == 1 and newBullLtfFvg
+        candidateTop := low
+        candidateBottom := high[2]
+        float equilibrium = (sweepExtreme + impulseHigh) / 2.0
+        locationOkay := not requireDiscount or (candidateTop + candidateBottom) / 2.0 <= equilibrium
+        candidateEntry := entryDepth == "Near edge" ? candidateTop :
+             entryDepth == "Far edge" ? candidateBottom : (candidateTop + candidateBottom) / 2.0
+    else if setupDirection == -1 and newBearLtfFvg
+        candidateTop := low[2]
+        candidateBottom := high
+        float equilibrium = (sweepExtreme + impulseLow) / 2.0
+        locationOkay := not requireDiscount or (candidateTop + candidateBottom) / 2.0 >= equilibrium
+        candidateEntry := entryDepth == "Near edge" ? candidateBottom :
+             entryDepth == "Far edge" ? candidateTop : (candidateTop + candidateBottom) / 2.0
+
+    if not na(candidateEntry)
+        checklistLtfFvg := true
+        checklistDiscountEvaluated := true
+        checklistDiscount := locationOkay
+
+    if not na(candidateEntry) and locationOkay
+        float candidateStop = setupDirection == 1 ?
+             sweepExtreme - stopBufferTicks * tickSize : sweepExtreme + stopBufferTicks * tickSize
+        float candidateRiskPoints = setupDirection * (candidateEntry - candidateStop)
+        float candidateRiskDollars = candidateRiskPoints * pointValuePerContract * contracts
+        float candidateTarget = candidateEntry + setupDirection * candidateRiskPoints * rewardRisk
+        bool validRisk = candidateRiskPoints >= minimumStopPoints and
+             candidateRiskDollars > 0 and candidateRiskDollars <= maximumRiskDollars
+        checklistRiskEvaluated := true
+        checklistRisk := validRisk
+        planEntry := candidateEntry
+        planStop := candidateStop
+        planTarget := candidateTarget
+        planRiskPoints := candidateRiskPoints
+        planRiskDollars := candidateRiskDollars
+        entryFvgTop := candidateTop
+        entryFvgBottom := candidateBottom
+        orderPlacedBar := bar_index
+        state := 3
+        currentTradeCounted := false
+        planTradable := validRisk and strategyTradeAllowed
+        fvgPlanEvent := true
+        tradeReadyEvent := validRisk
+        filteredRiskEvent := not validRisk
+        if not na(entryFvgBox)
+            box.delete(entryFvgBox)
+        entryFvgBox := showLtfZone ? box.new(bar_index, entryFvgTop, bar_index + maxLimitWaitBars,
+             entryFvgBottom, bgcolor = color.new(color.yellow, 78),
+             border_color = color.new(color.yellow, 15)) : na
+        if not na(activeRiskBox)
+            box.delete(activeRiskBox)
+        if not na(activeRewardBox)
+            box.delete(activeRewardBox)
+        if not na(activeSetupLabel)
+            label.delete(activeSetupLabel)
+        activeRiskBox := showPositionBoxes ? box.new(bar_index, math.max(planEntry, planStop),
+             bar_index + minimumBoxBars, math.min(planEntry, planStop),
+             bgcolor = color.new(color.red, 78),
+             border_color = validRisk ? color.new(color.red, 15) : color.orange) : na
+        activeRewardBox := showPositionBoxes ? box.new(bar_index, math.max(planEntry, planTarget),
+             bar_index + minimumBoxBars, math.min(planEntry, planTarget),
+             bgcolor = color.new(color.teal, 76),
+             border_color = validRisk ? color.new(color.lime, 20) : color.orange) : na
+        bool counterBias = biasAlignment == "Context only" and topDownBias != 0 and topDownBias != setupDirection
+        string setupGrade = not validRisk ? "RISK HIGH" : not strategyTradeAllowed ? "MANUAL ONLY" :
+             counterBias ? "COUNTER-BIAS" : "READY"
+        string setupText = setupGrade + " " + (setupDirection == 1 ? "LONG" : "SHORT") +
+             "\nE " + str.tostring(planEntry, format.mintick) +
+             "\nSL " + str.tostring(planStop, format.mintick) +
+             "\nTP " + str.tostring(planTarget, format.mintick) +
+             "\n$" + str.tostring(planRiskDollars, "#.0") + " · " + str.tostring(rewardRisk, "#.00") + "R"
+        color setupLabelColor = not validRisk or counterBias or not strategyTradeAllowed ? color.new(color.orange, 5) :
+             setupDirection == 1 ? color.new(color.teal, 5) : color.new(color.red, 5)
+        activeSetupLabel := showSetupLabels ? label.new(bar_index, planEntry, setupText,
+             style = setupDirection == 1 ? label.style_label_up : label.style_label_down,
+             color = setupLabelColor, textcolor = color.white, size = size.tiny) : na
+        string reviewAlert = syminfo.ticker + " " + entryTimeframeText + " " +
+             setupGrade + " " + (setupDirection == 1 ? "LONG" : "SHORT") +
+             " | D/4H/1H bias " + str.tostring(dailyBias) + "/" +
+             str.tostring(fourHourBias) + "/" + str.tostring(oneHourBias) +
+             " | Entry " + str.tostring(planEntry, format.mintick) +
+             " | Stop " + str.tostring(planStop, format.mintick) +
+             " | Target " + str.tostring(planTarget, format.mintick) +
+             " | Risk $" + str.tostring(planRiskDollars, "#.0") +
+             " | Review before taking trade"
+        alert(reviewAlert, alert.freq_once_per_bar_close)
+        if validRisk and strategyTradeAllowed
+            string entryAlert = setupDirection == 1 ?
+                 "HTF FVG strategy LONG entry" : "HTF FVG strategy SHORT entry"
+            if setupDirection == 1
+                strategy.entry("Long", strategy.long, qty = contracts, limit = planEntry,
+                     comment = "Bull FVG", alert_message = entryAlert)
+                strategy.exit("Long bracket", "Long", stop = planStop, limit = planTarget,
+                     alert_message = "HTF FVG strategy LONG exit")
+            else
+                strategy.entry("Short", strategy.short, qty = contracts, limit = planEntry,
+                     comment = "Bear FVG", alert_message = entryAlert)
+                strategy.exit("Short bracket", "Short", stop = planStop, limit = planTarget,
+                     alert_message = "HTF FVG strategy SHORT exit")
+
+// Keep the protective bracket active while the limit or position exists.
+if state == 3 or state == 4
+    if not na(activeRiskBox)
+        box.set_right(activeRiskBox, math.max(box.get_right(activeRiskBox), bar_index + 1))
+    if not na(activeRewardBox)
+        box.set_right(activeRewardBox, math.max(box.get_right(activeRewardBox), bar_index + 1))
+    if planTradable
+        if setupDirection == 1
+            strategy.exit("Long bracket", "Long", stop = planStop, limit = planTarget,
+                 alert_message = "HTF FVG strategy LONG exit")
+        else if setupDirection == -1
+            strategy.exit("Short bracket", "Short", stop = planStop, limit = planTarget,
+                 alert_message = "HTF FVG strategy SHORT exit")
+
+bool newPosition = strategy.position_size != 0 and strategy.position_size[1] == 0
+if newPosition
+    state := 4
+    if not currentTradeCounted
+        tradesToday += 1
+        currentTradeCounted := true
+
+bool closedPosition = strategy.closedtrades > nz(strategy.closedtrades[1])
+if closedPosition
+    // Historical entry and exit can occur inside one bar, in which case an
+    // open position is never visible to the script.  Count that fill here.
+    if not currentTradeCounted
+        tradesToday += 1
+    state := 0
+    setupDirection := 0
+    currentTradeCounted := false
+    planTradable := false
+    if state == 0
+        checklistDirection := 0
+        checklistInHtfZone := false
+        checklistSweep := false
+        checklistBos := false
+        checklistLtfFvg := false
+        checklistDiscount := false
+        checklistDiscountEvaluated := false
+        checklistRisk := false
+        checklistRiskEvaluated := false
+    if not na(activeRiskBox)
+        box.set_right(activeRiskBox, math.max(box.get_right(activeRiskBox), bar_index + 1))
+        activeRiskBox := na
+    if not na(activeRewardBox)
+        box.set_right(activeRewardBox, math.max(box.get_right(activeRewardBox), bar_index + 1))
+        activeRewardBox := na
+    // Keep the completed label and boxes as historical setup evidence.
+    activeSetupLabel := na
+    if not na(entryFvgBox)
+        box.delete(entryFvgBox)
+        entryFvgBox := na
+
+bool pendingExpired = state == 3 and strategy.position_size == 0 and
+     not na(orderPlacedBar) and bar_index - orderPlacedBar >= maxLimitWaitBars
+bool pendingInvalid = state == 3 and strategy.position_size == 0 and
+     (setupDirection == 1 ? close <= planStop : close >= planStop)
+if pendingExpired or pendingInvalid
+    if setupDirection == 1
+        strategy.cancel("Long")
+    else
+        strategy.cancel("Short")
+    state := 0
+    setupDirection := 0
+    planEntry := na
+    planStop := na
+    planTarget := na
+    planRiskPoints := na
+    planRiskDollars := na
+    currentTradeCounted := false
+    planTradable := false
+    checklistDirection := 0
+    checklistInHtfZone := false
+    checklistSweep := false
+    checklistBos := false
+    checklistLtfFvg := false
+    checklistDiscount := false
+    checklistDiscountEvaluated := false
+    checklistRisk := false
+    checklistRiskEvaluated := false
+    if not na(entryFvgBox)
+        box.set_right(entryFvgBox, math.max(box.get_right(entryFvgBox), bar_index + 1))
+        entryFvgBox := na
+    if not na(activeRiskBox)
+        box.set_right(activeRiskBox, math.max(box.get_right(activeRiskBox), bar_index + 1))
+        activeRiskBox := na
+    if not na(activeRewardBox)
+        box.set_right(activeRewardBox, math.max(box.get_right(activeRewardBox), bar_index + 1))
+        activeRewardBox := na
+    if not na(activeSetupLabel)
+        activeSetupLabel := na
+
+if time > backtestEnd
+    strategy.cancel("Long")
+    strategy.cancel("Short")
+    if strategy.position_size != 0
+        strategy.close_all(comment = "Backtest end", immediately = true,
+             alert_message = "HTF FVG strategy: backtest end exit")
+    else if state == 3
+        if not na(activeRiskBox)
+            box.delete(activeRiskBox)
+            activeRiskBox := na
+        if not na(activeRewardBox)
+            box.delete(activeRewardBox)
+            activeRewardBox := na
+        if not na(activeSetupLabel)
+            label.delete(activeSetupLabel)
+            activeSetupLabel := na
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Visuals and alerts
+// ─────────────────────────────────────────────────────────────────────────────
+
+plot(state >= 1 and setupDirection == 1 ? shiftLevel : na, "Bull CISD level",
+     color = color.lime, linewidth = 2, style = plot.style_linebr)
+plot(state >= 1 and setupDirection == -1 ? shiftLevel : na, "Bear CISD level",
+     color = color.red, linewidth = 2, style = plot.style_linebr)
+plot(state >= 3 ? planEntry : na, "Planned entry", color = color.yellow, linewidth = 2, style = plot.style_linebr)
+plot(state >= 3 ? planStop : na, "Planned stop", color = color.red, linewidth = 2, style = plot.style_linebr)
+plot(state >= 3 ? planTarget : na, "Planned target", color = color.lime, linewidth = 2, style = plot.style_linebr)
+
+plotshape(showSignals and bullSweepEvent, "Bull liquidity sweep", shape.triangleup,
+     location.belowbar, color = color.aqua, size = size.tiny, text = "SWP")
+plotshape(showSignals and bearSweepEvent, "Bear liquidity sweep", shape.triangledown,
+     location.abovebar, color = color.orange, size = size.tiny, text = "SWP")
+plotshape(showSignals and bullShiftEvent, "Bull CISD", shape.labelup,
+     location.belowbar, color = color.lime, textcolor = color.black, size = size.tiny, text = "CISD")
+plotshape(showSignals and bearShiftEvent, "Bear CISD", shape.labeldown,
+     location.abovebar, color = color.red, textcolor = color.white, size = size.tiny, text = "CISD")
+plotshape(showSignals and fvgPlanEvent and setupDirection == 1, "Bull candidate FVG", shape.diamond,
+     location.belowbar, color = color.yellow, size = size.tiny)
+plotshape(showSignals and fvgPlanEvent and setupDirection == -1, "Bear candidate FVG", shape.diamond,
+     location.abovebar, color = color.yellow, size = size.tiny)
+
+alertcondition(tradeReadyEvent and setupDirection == 1, "Bullish HTF FVG setup ready",
+     "Bullish HTF FVG → sweep → BOS/CISD → entry FVG setup ready. Review the trade box.")
+alertcondition(tradeReadyEvent and setupDirection == -1, "Bearish HTF FVG setup ready",
+     "Bearish HTF FVG → sweep → BOS/CISD → entry FVG setup ready. Review the trade box.")
+alertcondition(fvgPlanEvent and not tradeReadyEvent, "Structure found — risk warning",
+     "The structure sequence completed, but planned risk exceeds the configured account limit.")
+alertcondition(filteredRiskEvent, "Setup rejected by risk guard",
+     "HTF FVG setup was rejected because its sweep stop exceeded the risk settings.")
+
+f_checkMark(bool passed, bool evaluated) =>
+    passed ? "✓" : evaluated ? "✕" : "…"
+
+f_checkColor(bool passed, bool evaluated) =>
+    passed ? color.rgb(22, 115, 66) : evaluated ? color.rgb(145, 45, 45) : color.rgb(62, 62, 70)
+
+f_biasSymbol(int value) =>
+    value == 1 ? "▲" : value == -1 ? "▼" : "—"
+
+int displayDirection = setupDirection != 0 ? setupDirection : checklistDirection
+bool htfChecklist = not na(bullHtfTop) or not na(bearHtfTop)
+bool rrChecklist = rewardRisk >= 2.0
+bool hasDirectionalBias = topDownBias != 0
+bool biasMatchesDirection = displayDirection == 0 ? hasDirectionalBias : topDownBias == displayDirection
+bool biasGateChecklist = not biasFilterRequired or biasMatchesDirection
+bool counterBiasChecklist = biasAlignment == "Context only" and displayDirection != 0 and
+     hasDirectionalBias and not biasMatchesDirection
+bool structureChecklist = checklistInHtfZone and checklistSweep and checklistBos and
+     checklistLtfFvg and checklistDiscount
+bool setupChecklist = biasGateChecklist and structureChecklist and checklistRisk and rrChecklist
+bool manualOnlyChecklist = setupChecklist and not strategyTradeAllowed
+string statusText = not validChart ? "USE 5m / 15m" :
+     state == 4 ? "IN TRADE" : state == 5 ? "DAY DONE" :
+     structureChecklist and checklistRiskEvaluated and not checklistRisk ? "RISK HIGH" :
+     manualOnlyChecklist ? "MANUAL" : setupChecklist and counterBiasChecklist ? "COUNTER" : setupChecklist ? "READY" :
+     state == 1 ? "WAIT BOS" : state == 2 ? "WAIT " + entryTimeframeText + " FVG" :
+     biasFilterRequired and topDownBias == 0 ? "WAIT BIAS" : "SCANNING"
+string directionText = displayDirection == 1 ? "LONG" : displayDirection == -1 ? "SHORT" : "—"
+string htfText = not na(bullHtfTop) and not na(bearHtfTop) ? "BULL + BEAR" :
+     not na(bullHtfTop) ? "BULL" : not na(bearHtfTop) ? "BEAR" : "NONE"
+string biasStackText = f_biasSymbol(dailyBias) + " / " + f_biasSymbol(fourHourBias) + " / " + f_biasSymbol(oneHourBias)
+string biasText = biasAlignment == "Off" ? "OFF" : topDownBias == 1 ? "LONG " + str.tostring(bullBiasVotes) + "/3" :
+     topDownBias == -1 ? "SHORT " + str.tostring(bearBiasVotes) + "/3" : "MIXED"
+string biasReviewText = biasAlignment == "Off" ? "OFF" : counterBiasChecklist ? "⚠ AGAINST" :
+     biasMatchesDirection ? "✓ " + biasText : "… " + biasText
+string resultText = str.tostring(strategy.wintrades) + "W / " + str.tostring(strategy.losstrades) + "L"
+int closedCount = strategy.closedtrades
+string winRateText = closedCount > 0 ? str.tostring(100.0 * strategy.wintrades / closedCount, "#.0") + "%" : "—"
+string pfText = strategy.grossloss != 0 ? str.tostring(strategy.grossprofit / math.abs(strategy.grossloss), "#.00") : "—"
+
+string dashboardPosition = dashboardLocation == "Top left" ? position.top_left :
+     dashboardLocation == "Top right" ? position.top_right :
+     dashboardLocation == "Bottom left" ? position.bottom_left : position.bottom_right
+var table dashboard = table.new(dashboardPosition, 2, 17,
+     bgcolor = color.new(color.black, 15), border_width = 1, border_color = color.new(color.gray, 50))
+
+if barstate.islast and showDashboard
+    table.clear(dashboard, 0, 0, 1, 16)
+    bool warningStatus = counterBiasChecklist or manualOnlyChecklist or
+         (structureChecklist and checklistRiskEvaluated and not checklistRisk)
+    color statusColor = state == 5 ? color.rgb(65, 65, 72) : warningStatus ? color.rgb(175, 105, 15) :
+         state == 4 or (setupChecklist and state != 5) ? color.rgb(20, 120, 70) : color.rgb(65, 65, 72)
+    color biasColor = topDownBias == 1 ? color.rgb(22, 115, 66) :
+         topDownBias == -1 ? color.rgb(145, 45, 45) : color.rgb(62, 62, 70)
+    string sweepName = displayDirection == -1 ? "Prior high swept" :
+         displayDirection == 1 ? "Prior low swept" : "Prior low/high swept"
+    string locationName = displayDirection == -1 ? "FVG in premium" :
+         displayDirection == 1 ? "FVG in discount" : "FVG location valid"
+    table.cell(dashboard, 0, 0, "TRADE CHECK", text_color = color.white, bgcolor = color.rgb(35, 55, 90), text_size = size.tiny)
+    table.cell(dashboard, 1, 0, statusText, text_color = color.white, bgcolor = statusColor, text_size = size.tiny)
+
+    table.cell(dashboard, 0, 1, "D / 4H / 1H BOS", text_color = color.silver, text_size = size.tiny)
+    table.cell(dashboard, 1, 1, biasStackText, text_color = color.white, bgcolor = biasColor, text_size = size.tiny)
+    table.cell(dashboard, 0, 2, "Top-down bias", text_color = color.silver, text_size = size.tiny)
+    table.cell(dashboard, 1, 2, biasReviewText, text_color = color.white,
+         bgcolor = counterBiasChecklist ? color.rgb(175, 105, 15) :
+         biasMatchesDirection ? color.rgb(22, 115, 66) : color.rgb(62, 62, 70), text_size = size.tiny)
+    table.cell(dashboard, 0, 3, higherTimeframeText + " FVG key level", text_color = color.silver, text_size = size.tiny)
+    table.cell(dashboard, 1, 3, f_checkMark(htfChecklist, true) + " " + htfText,
+         text_color = color.white, bgcolor = f_checkColor(htfChecklist, true), text_size = size.tiny)
+    table.cell(dashboard, 0, 4, "Touched " + higherTimeframeText + " FVG", text_color = color.silver, text_size = size.tiny)
+    table.cell(dashboard, 1, 4, f_checkMark(checklistInHtfZone, checklistSweep),
+         text_color = color.white, bgcolor = f_checkColor(checklistInHtfZone, checklistSweep), text_size = size.tiny)
+    table.cell(dashboard, 0, 5, sweepName, text_color = color.silver, text_size = size.tiny)
+    table.cell(dashboard, 1, 5, f_checkMark(checklistSweep, false),
+         text_color = color.white, bgcolor = f_checkColor(checklistSweep, false), text_size = size.tiny)
+    table.cell(dashboard, 0, 6, "BOS / CISD close", text_color = color.silver, text_size = size.tiny)
+    table.cell(dashboard, 1, 6, f_checkMark(checklistBos, false),
+         text_color = color.white, bgcolor = f_checkColor(checklistBos, false), text_size = size.tiny)
+    table.cell(dashboard, 0, 7, "New " + entryTimeframeText + " FVG", text_color = color.silver, text_size = size.tiny)
+    table.cell(dashboard, 1, 7, f_checkMark(checklistLtfFvg, false),
+         text_color = color.white, bgcolor = f_checkColor(checklistLtfFvg, false), text_size = size.tiny)
+    table.cell(dashboard, 0, 8, locationName, text_color = color.silver, text_size = size.tiny)
+    table.cell(dashboard, 1, 8, f_checkMark(checklistDiscount, checklistDiscountEvaluated),
+         text_color = color.white, bgcolor = f_checkColor(checklistDiscount, checklistDiscountEvaluated), text_size = size.tiny)
+    table.cell(dashboard, 0, 9, "Risk ≤ $" + str.tostring(maximumRiskDollars, "#.0"), text_color = color.silver, text_size = size.tiny)
+    table.cell(dashboard, 1, 9, f_checkMark(checklistRisk, checklistRiskEvaluated),
+         text_color = color.white, bgcolor = f_checkColor(checklistRisk, checklistRiskEvaluated), text_size = size.tiny)
+    table.cell(dashboard, 0, 10, "Reward ≥ 2R", text_color = color.silver, text_size = size.tiny)
+    table.cell(dashboard, 1, 10, f_checkMark(rrChecklist, true) + " " + str.tostring(rewardRisk, "#.00") + "R",
+         text_color = color.white, bgcolor = f_checkColor(rrChecklist, true), text_size = size.tiny)
+
+    table.cell(dashboard, 0, 11, "SETUP", text_color = color.white, bgcolor = color.rgb(35, 55, 90), text_size = size.tiny)
+    string setupCellText = structureChecklist and checklistRiskEvaluated and not checklistRisk ? "RISK HIGH " + directionText :
+         manualOnlyChecklist ? "MANUAL " + directionText :
+         setupChecklist and counterBiasChecklist ? "COUNTER " + directionText :
+         setupChecklist ? "✓ " + directionText : directionText
+    table.cell(dashboard, 1, 11, setupCellText, text_color = color.white,
+         bgcolor = warningStatus ? color.rgb(175, 105, 15) :
+         setupChecklist ? color.rgb(20, 120, 70) : color.rgb(62, 62, 70), text_size = size.tiny)
+    table.cell(dashboard, 0, 12, "Entry", text_color = color.silver, text_size = size.tiny)
+    table.cell(dashboard, 1, 12, na(planEntry) ? "—" : str.tostring(planEntry, format.mintick), text_color = color.yellow, text_size = size.tiny)
+    table.cell(dashboard, 0, 13, "Stop", text_color = color.silver, text_size = size.tiny)
+    table.cell(dashboard, 1, 13, na(planStop) ? "—" : str.tostring(planStop, format.mintick), text_color = color.red, text_size = size.tiny)
+    table.cell(dashboard, 0, 14, "Target / risk", text_color = color.silver, text_size = size.tiny)
+    table.cell(dashboard, 1, 14, na(planTarget) ? "—" : str.tostring(planTarget, format.mintick) + " / $" + str.tostring(planRiskDollars, "#.0"), text_color = color.lime, text_size = size.tiny)
+    if showDashboardStats
+        table.cell(dashboard, 0, 15, "Results", text_color = color.silver, text_size = size.tiny)
+        table.cell(dashboard, 1, 15, resultText + " · " + winRateText, text_color = color.white, text_size = size.tiny)
+        table.cell(dashboard, 0, 16, "Net / PF", text_color = color.silver, text_size = size.tiny)
+        table.cell(dashboard, 1, 16, "$" + str.tostring(strategy.netprofit, "#.0") + " / " + pfText,
+             text_color = strategy.netprofit >= 0 ? color.lime : color.red, text_size = size.tiny)
+
+if barstate.islast and not showDashboard
+    table.clear(dashboard, 0, 0, 1, 16)

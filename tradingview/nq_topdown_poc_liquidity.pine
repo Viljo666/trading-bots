@@ -1,0 +1,501 @@
+//@version=6
+indicator("NQ Top-Down POC + Liquidity [Research]", "NQ POC Liquidity", overlay = true,
+     max_labels_count = 300, max_boxes_count = 200)
+
+// Research-only visual indicator for the separate NQ setup.
+// Best used on NQ1! extended-hours charts at 5m or 15m.
+// The prior RTH POC is estimated from chart-bar volume so this script does not
+// require TradingView's Premium/Ultimate footprint-data feature.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inputs
+// ─────────────────────────────────────────────────────────────────────────────
+
+string GROUP_SETUP = "Setup"
+string GROUP_POC = "Prior RTH POC"
+string GROUP_RISK = "Risk and target"
+string GROUP_DISPLAY = "Display and alerts"
+string NY_TZ = "America/New_York"
+
+int structureLeft = input.int(2, "4H swing bars left", minval = 1, maxval = 10, group = GROUP_SETUP)
+int structureRight = input.int(2, "4H swing bars right", minval = 1, maxval = 10, group = GROUP_SETUP)
+int entrySwingBars = input.int(2, "Entry-TF safe-level swing bars", minval = 1, maxval = 10, group = GROUP_SETUP)
+int eventExpiryHours = input.int(12, "4H setup expires after hours", minval = 1, maxval = 24, group = GROUP_SETUP)
+string rthSession = input.session("0930-1600", "New York RTH", group = GROUP_SETUP)
+string overnightSession = input.session("1800-0930", "Overnight session", group = GROUP_SETUP)
+
+int pocRowTicks = input.int(16, "POC row size in ticks", minval = 1, maxval = 200, group = GROUP_POC,
+     tooltip = "NQ default: 16 ticks = 4 points. Volume is spread across every price row touched by each chart bar.")
+
+int stopBufferTicks = input.int(1, "Stop buffer beyond safe level (ticks)", minval = 0, maxval = 20, group = GROUP_RISK)
+float minimumTargetR = input.float(1.5, "Minimum reward to visible liquidity", minval = 0.5, step = 0.25, group = GROUP_RISK)
+float fallbackTargetR = input.float(2.0, "Target R when no liquidity is above/below entry", minval = 0.5, step = 0.25, group = GROUP_RISK)
+int equalLevelTicks = input.int(2, "Equal-high/low tolerance (ticks)", minval = 1, maxval = 20, group = GROUP_RISK)
+int equalLevelMaxAge = input.int(200, "Equal-high/low maximum age (bars)", minval = 10, maxval = 2000, group = GROUP_RISK)
+bool trailSafeLevel = input.bool(false, "Trail stop with newer safe swings", group = GROUP_RISK,
+     tooltip = "Off matches the current research backtest. Turn on only for visual experimentation.")
+bool forceRthClose = input.bool(true, "Close active setup at 16:00 New York", group = GROUP_RISK)
+
+bool showBiasBackground = input.bool(true, "Shade strict M/W/D bias", group = GROUP_DISPLAY)
+bool showNyBackground = input.bool(true, "Highlight New York RTH", group = GROUP_DISPLAY)
+bool showLiquidity = input.bool(true, "Show POC and liquidity levels", group = GROUP_DISPLAY)
+bool showDashboard = input.bool(true, "Show dashboard", group = GROUP_DISPLAY)
+bool showTradeLabels = input.bool(true, "Show entry and exit labels", group = GROUP_DISPLAY)
+bool showPositionBoxes = input.bool(true, "Show automatic risk/reward boxes", group = GROUP_DISPLAY)
+bool enableDynamicAlerts = input.bool(false, "Send dynamic alert() messages", group = GROUP_DISPLAY,
+     tooltip = "After enabling this, create a TradingView alert using 'Any alert() function call'.")
+
+float tick = syminfo.mintick
+float pocStep = pocRowTicks * tick
+float stopBuffer = stopBufferTicks * tick
+float equalTolerance = equalLevelTicks * tick
+bool supportedChart = timeframe.isminutes and (timeframe.multiplier == 5 or timeframe.multiplier == 15)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Confirmed, non-repainting higher-timeframe bias
+// ─────────────────────────────────────────────────────────────────────────────
+
+[monthOpen, monthClose] = request.security(syminfo.tickerid, "1M", [open[1], close[1]], lookahead = barmerge.lookahead_on)
+[weekOpen, weekClose] = request.security(syminfo.tickerid, "1W", [open[1], close[1]], lookahead = barmerge.lookahead_on)
+[dayOpen, dayClose] = request.security(syminfo.tickerid, "1D", [open[1], close[1]], lookahead = barmerge.lookahead_on)
+
+bool monthBull = monthClose > monthOpen
+bool monthBear = monthClose < monthOpen
+bool weekBull = weekClose > weekOpen
+bool weekBear = weekClose < weekOpen
+bool dayBull = dayClose > dayOpen
+bool dayBear = dayClose < dayOpen
+bool strictBullBias = monthBull and weekBull and dayBull
+bool strictBearBias = monthBear and weekBear and dayBear
+
+// This function runs in the 4H context. Every returned value is offset by one
+// completed 4H candle, which keeps historical and realtime behavior consistent.
+confirmedStructure() =>
+    float pivotHigh = ta.pivothigh(high, structureLeft, structureRight)
+    float pivotLow = ta.pivotlow(low, structureLeft, structureRight)
+    float lastHigh = ta.valuewhen(not na(pivotHigh), pivotHigh, 0)
+    float lastLow = ta.valuewhen(not na(pivotLow), pivotLow, 0)
+    bool bullBreak = not na(lastHigh) and close > lastHigh and close[1] <= lastHigh
+    bool bearBreak = not na(lastLow) and close < lastLow and close[1] >= lastLow
+    [bullBreak[1], bearBreak[1], lastHigh[1], lastLow[1]]
+
+[bullBreak4hRaw, bearBreak4hRaw, lastStructureHigh4h, lastStructureLow4h] =
+  request.security(syminfo.tickerid, "240", confirmedStructure(), lookahead = barmerge.lookahead_on)
+
+bool newBullBreak4h = bullBreak4hRaw and not bullBreak4hRaw[1]
+bool newBearBreak4h = bearBreak4hRaw and not bearBreak4hRaw[1]
+
+var int armedDirection = 0
+var int armedAt = na
+if newBullBreak4h
+    armedDirection := 1
+    armedAt := time
+if newBearBreak4h
+    armedDirection := -1
+    armedAt := time
+if armedDirection != 0 and not na(armedAt) and time - armedAt > eventExpiryHours * 60 * 60 * 1000
+    armedDirection := 0
+    armedAt := na
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Approximate prior New York RTH volume-profile POC
+// ─────────────────────────────────────────────────────────────────────────────
+
+profilePoc(float basePrice, float rowSize, array<float> rows) =>
+    float result = na
+    if array.size(rows) > 0
+        float largest = array.max(rows)
+        int largestIndex = array.indexof(rows, largest)
+        result := basePrice + (largestIndex + 0.5) * rowSize
+    result
+
+bool inRth = not na(time(timeframe.period, rthSession, NY_TZ))
+bool newRth = inRth and not inRth[1]
+bool endRth = not inRth and inRth[1]
+bool inOvernight = not na(time(timeframe.period, overnightSession, NY_TZ))
+bool newOvernight = inOvernight and not inOvernight[1]
+
+var array<float> rthProfile = array.new<float>(0)
+var float rthProfileBase = na
+var float currentRthHigh = na
+var float currentRthLow = na
+var float priorRthPoc = na
+var float priorRthHigh = na
+var float priorRthLow = na
+var bool rthProfileFinalized = true
+
+if newRth
+    // This fallback also works when a chart hides extended-hours bars and never
+    // produces a separate end-of-RTH bar.
+    if array.size(rthProfile) > 0 and not rthProfileFinalized
+        priorRthPoc := profilePoc(rthProfileBase, pocStep, rthProfile)
+        priorRthHigh := currentRthHigh
+        priorRthLow := currentRthLow
+    array.clear(rthProfile)
+    rthProfileBase := math.floor(low / pocStep) * pocStep
+    currentRthHigh := high
+    currentRthLow := low
+    rthProfileFinalized := false
+
+if inRth
+    if na(rthProfileBase)
+        rthProfileBase := math.floor(low / pocStep) * pocStep
+    currentRthHigh := na(currentRthHigh) ? high : math.max(currentRthHigh, high)
+    currentRthLow := na(currentRthLow) ? low : math.min(currentRthLow, low)
+
+    float firstPriceRow = math.floor(low / pocStep) * pocStep
+    float lastPriceRow = math.floor(high / pocStep) * pocStep
+    if firstPriceRow < rthProfileBase
+        int prependCount = int(math.round((rthProfileBase - firstPriceRow) / pocStep))
+        if prependCount > 0
+            for row = 0 to prependCount - 1
+                array.unshift(rthProfile, 0.0)
+        rthProfileBase := firstPriceRow
+
+    int firstIndex = int(math.floor((firstPriceRow - rthProfileBase) / pocStep + 0.000001))
+    int lastIndex = int(math.floor((lastPriceRow - rthProfileBase) / pocStep + 0.000001))
+    while array.size(rthProfile) <= lastIndex
+        array.push(rthProfile, 0.0)
+    int touchedRows = math.max(1, lastIndex - firstIndex + 1)
+    float volumePerRow = nz(volume) / touchedRows
+    if lastIndex >= firstIndex
+        for row = firstIndex to lastIndex
+            array.set(rthProfile, row, array.get(rthProfile, row) + volumePerRow)
+
+if endRth and array.size(rthProfile) > 0
+    priorRthPoc := profilePoc(rthProfileBase, pocStep, rthProfile)
+    priorRthHigh := currentRthHigh
+    priorRthLow := currentRthLow
+    rthProfileFinalized := true
+
+// Overnight levels remain at their final values throughout New York RTH.
+var float overnightHigh = na
+var float overnightLow = na
+if newOvernight
+    overnightHigh := high
+    overnightLow := low
+else if inOvernight
+    overnightHigh := na(overnightHigh) ? high : math.max(overnightHigh, high)
+    overnightLow := na(overnightLow) ? low : math.min(overnightLow, low)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Entry-timeframe safe swings and equal-high/low liquidity
+// ─────────────────────────────────────────────────────────────────────────────
+
+float entryPivotHigh = ta.pivothigh(high, entrySwingBars, entrySwingBars)
+float entryPivotLow = ta.pivotlow(low, entrySwingBars, entrySwingBars)
+var float latestSafeHigh = na
+var float latestSafeLow = na
+var float previousPivotHigh = na
+var float previousPivotLow = na
+var float equalHigh = na
+var float equalLow = na
+var int equalHighFoundAt = na
+var int equalLowFoundAt = na
+
+if not na(entryPivotHigh)
+    latestSafeHigh := entryPivotHigh
+    if not na(previousPivotHigh) and math.abs(entryPivotHigh - previousPivotHigh) <= equalTolerance
+        equalHigh := math.avg(entryPivotHigh, previousPivotHigh)
+        equalHighFoundAt := bar_index
+    previousPivotHigh := entryPivotHigh
+
+if not na(entryPivotLow)
+    latestSafeLow := entryPivotLow
+    if not na(previousPivotLow) and math.abs(entryPivotLow - previousPivotLow) <= equalTolerance
+        equalLow := math.avg(entryPivotLow, previousPivotLow)
+        equalLowFoundAt := bar_index
+    previousPivotLow := entryPivotLow
+
+float usableEqualHigh = not na(equalHighFoundAt) and bar_index - equalHighFoundAt <= equalLevelMaxAge ? equalHigh : na
+float usableEqualLow = not na(equalLowFoundAt) and bar_index - equalLowFoundAt <= equalLevelMaxAge ? equalLow : na
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Setup state, objective target selection, and visual trade tracking
+// ─────────────────────────────────────────────────────────────────────────────
+
+var int activeDirection = 0
+var int entryBar = na
+var float activeEntry = na
+var float activeStop = na
+var float activeTarget = na
+var string activeTargetSource = ""
+var box activeRiskBox = na
+var box activeRewardBox = na
+var int completedWins = 0
+var int completedLosses = 0
+var int completedBreakevens = 0
+
+bool longEntrySignal = false
+bool shortEntrySignal = false
+bool stopExitSignal = false
+bool targetExitSignal = false
+bool sessionExitSignal = false
+
+bool rthClosingBar = hour(time_close, NY_TZ) == 16 and minute(time_close, NY_TZ) == 0
+
+// Extend the shaded risk/reward position until this setup exits.
+if activeDirection != 0 and showPositionBoxes
+    if not na(activeRiskBox)
+        box.set_right(activeRiskBox, bar_index + 1)
+    if not na(activeRewardBox)
+        box.set_right(activeRewardBox, bar_index + 1)
+
+// A new confirmed safe swing can optionally trail the stop. Default off matches
+// the separate Python research test.
+if activeDirection == 1 and trailSafeLevel and not na(entryPivotLow)
+    float proposedLongTrail = entryPivotLow - stopBuffer
+    if proposedLongTrail > activeStop and proposedLongTrail < close
+        activeStop := proposedLongTrail
+        if showPositionBoxes and not na(activeRiskBox)
+            box.set_bottom(activeRiskBox, activeStop)
+if activeDirection == -1 and trailSafeLevel and not na(entryPivotHigh)
+    float proposedShortTrail = entryPivotHigh + stopBuffer
+    if proposedShortTrail < activeStop and proposedShortTrail > close
+        activeStop := proposedShortTrail
+        if showPositionBoxes and not na(activeRiskBox)
+            box.set_top(activeRiskBox, activeStop)
+
+// Exit checks begin on the bar after entry because entry is at the signal-bar close.
+if activeDirection != 0 and bar_index > entryBar
+    bool hitStop = activeDirection == 1 ? low <= activeStop : high >= activeStop
+    bool hitTarget = activeDirection == 1 ? high >= activeTarget : low <= activeTarget
+    if hitStop
+        stopExitSignal := true
+        float stopOutcome = activeDirection == 1 ? activeStop - activeEntry : activeEntry - activeStop
+        if stopOutcome > tick / 2
+            completedWins += 1
+        else if stopOutcome < -tick / 2
+            completedLosses += 1
+        else
+            completedBreakevens += 1
+        if showTradeLabels
+            label.new(bar_index, activeDirection == 1 ? low : high, "STOP\n" + str.tostring(activeStop, format.mintick),
+                 style = activeDirection == 1 ? label.style_label_up : label.style_label_down,
+                 color = color.new(color.red, 0), textcolor = color.white, size = size.tiny)
+        activeDirection := 0
+    else if hitTarget
+        targetExitSignal := true
+        float targetOutcome = activeDirection == 1 ? activeTarget - activeEntry : activeEntry - activeTarget
+        if targetOutcome > tick / 2
+            completedWins += 1
+        else if targetOutcome < -tick / 2
+            completedLosses += 1
+        else
+            completedBreakevens += 1
+        if showTradeLabels
+            label.new(bar_index, activeDirection == 1 ? high : low, "TARGET\n" + activeTargetSource,
+                 style = activeDirection == 1 ? label.style_label_down : label.style_label_up,
+                 color = color.new(color.green, 0), textcolor = color.white, size = size.tiny)
+        activeDirection := 0
+    else if forceRthClose and rthClosingBar
+        sessionExitSignal := true
+        float sessionOutcome = activeDirection == 1 ? close - activeEntry : activeEntry - close
+        if sessionOutcome > tick / 2
+            completedWins += 1
+        else if sessionOutcome < -tick / 2
+            completedLosses += 1
+        else
+            completedBreakevens += 1
+        if showTradeLabels
+            label.new(bar_index, close, "16:00 EXIT", style = label.style_label_left,
+                 color = color.new(color.gray, 15), textcolor = color.white, size = size.tiny)
+        activeDirection := 0
+
+if activeDirection == 0
+    activeEntry := na
+    activeStop := na
+    activeTarget := na
+    activeTargetSource := ""
+    entryBar := na
+
+bool entryCandleConfirmed = barstate.isconfirmed and supportedChart and not rthClosingBar
+bool longCandidate = entryCandleConfirmed and activeDirection == 0 and armedDirection == 1 and
+     strictBullBias and close > open and close > priorRthPoc and not na(latestSafeLow)
+bool shortCandidate = entryCandleConfirmed and activeDirection == 0 and armedDirection == -1 and
+     strictBearBias and close < open and close < priorRthPoc and not na(latestSafeHigh)
+
+if longCandidate
+    float proposedStop = latestSafeLow - stopBuffer
+    float risk = close - proposedStop
+    if risk > 0
+        float visibleTarget = na
+        string targetSource = ""
+        if not na(priorRthHigh) and priorRthHigh > close
+            visibleTarget := priorRthHigh
+            targetSource := "Prior RTH high"
+        if not na(overnightHigh) and overnightHigh > close and (na(visibleTarget) or overnightHigh < visibleTarget)
+            visibleTarget := overnightHigh
+            targetSource := "Overnight high"
+        if not na(usableEqualHigh) and usableEqualHigh > close and (na(visibleTarget) or usableEqualHigh < visibleTarget)
+            visibleTarget := usableEqualHigh
+            targetSource := "Equal highs"
+        bool hasVisibleTarget = not na(visibleTarget)
+        float chosenTarget = hasVisibleTarget ? visibleTarget : close + fallbackTargetR * risk
+        bool rewardIsValid = not hasVisibleTarget or (chosenTarget - close) / risk >= minimumTargetR
+        if rewardIsValid
+            activeDirection := 1
+            activeEntry := close
+            activeStop := proposedStop
+            activeTarget := chosenTarget
+            activeTargetSource := hasVisibleTarget ? targetSource : str.tostring(fallbackTargetR) + "R fallback"
+            entryBar := bar_index
+            longEntrySignal := true
+            armedDirection := 0
+            armedAt := na
+            if showPositionBoxes
+                activeRiskBox := box.new(left = bar_index, top = activeEntry, right = bar_index + 1, bottom = activeStop,
+                     xloc = xloc.bar_index, border_color = color.new(color.red, 5), border_width = 1,
+                     bgcolor = color.new(color.red, 78), text = "RISK", text_color = color.white, text_size = size.tiny)
+                activeRewardBox := box.new(left = bar_index, top = activeTarget, right = bar_index + 1, bottom = activeEntry,
+                     xloc = xloc.bar_index, border_color = color.new(color.lime, 5), border_width = 1,
+                     bgcolor = color.new(color.lime, 82), text = "REWARD", text_color = color.white, text_size = size.tiny)
+            if showTradeLabels
+                label.new(bar_index, low, "LONG\nPOC " + str.tostring(priorRthPoc, format.mintick) +
+                     "\nSL " + str.tostring(activeStop, format.mintick) +
+                     "\nTP " + str.tostring(activeTarget, format.mintick),
+                     style = label.style_label_up, color = color.new(color.lime, 0), textcolor = color.black, size = size.small)
+
+if shortCandidate
+    float proposedStop = latestSafeHigh + stopBuffer
+    float risk = proposedStop - close
+    if risk > 0
+        float visibleTarget = na
+        string targetSource = ""
+        if not na(priorRthLow) and priorRthLow < close
+            visibleTarget := priorRthLow
+            targetSource := "Prior RTH low"
+        if not na(overnightLow) and overnightLow < close and (na(visibleTarget) or overnightLow > visibleTarget)
+            visibleTarget := overnightLow
+            targetSource := "Overnight low"
+        if not na(usableEqualLow) and usableEqualLow < close and (na(visibleTarget) or usableEqualLow > visibleTarget)
+            visibleTarget := usableEqualLow
+            targetSource := "Equal lows"
+        bool hasVisibleTarget = not na(visibleTarget)
+        float chosenTarget = hasVisibleTarget ? visibleTarget : close - fallbackTargetR * risk
+        bool rewardIsValid = not hasVisibleTarget or (close - chosenTarget) / risk >= minimumTargetR
+        if rewardIsValid
+            activeDirection := -1
+            activeEntry := close
+            activeStop := proposedStop
+            activeTarget := chosenTarget
+            activeTargetSource := hasVisibleTarget ? targetSource : str.tostring(fallbackTargetR) + "R fallback"
+            entryBar := bar_index
+            shortEntrySignal := true
+            armedDirection := 0
+            armedAt := na
+            if showPositionBoxes
+                activeRiskBox := box.new(left = bar_index, top = activeStop, right = bar_index + 1, bottom = activeEntry,
+                     xloc = xloc.bar_index, border_color = color.new(color.red, 5), border_width = 1,
+                     bgcolor = color.new(color.red, 78), text = "RISK", text_color = color.white, text_size = size.tiny)
+                activeRewardBox := box.new(left = bar_index, top = activeEntry, right = bar_index + 1, bottom = activeTarget,
+                     xloc = xloc.bar_index, border_color = color.new(color.lime, 5), border_width = 1,
+                     bgcolor = color.new(color.lime, 82), text = "REWARD", text_color = color.white, text_size = size.tiny)
+            if showTradeLabels
+                label.new(bar_index, high, "SHORT\nPOC " + str.tostring(priorRthPoc, format.mintick) +
+                     "\nSL " + str.tostring(activeStop, format.mintick) +
+                     "\nTP " + str.tostring(activeTarget, format.mintick),
+                     style = label.style_label_down, color = color.new(color.red, 0), textcolor = color.white, size = size.small)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Plots and alerts
+// ─────────────────────────────────────────────────────────────────────────────
+
+color biasColor = strictBullBias ? color.new(color.green, 92) : strictBearBias ? color.new(color.red, 92) : na
+bgcolor(showBiasBackground ? biasColor : na, title = "Strict M/W/D bias")
+bgcolor(showNyBackground and inRth ? color.new(color.blue, 94) : na, title = "New York RTH")
+
+plot(showLiquidity ? priorRthPoc : na, "Estimated prior RTH POC", color = color.yellow, linewidth = 2, style = plot.style_stepline)
+plot(showLiquidity ? priorRthHigh : na, "Prior RTH high", color = color.new(color.gray, 35), style = plot.style_stepline)
+plot(showLiquidity ? priorRthLow : na, "Prior RTH low", color = color.new(color.gray, 35), style = plot.style_stepline)
+plot(showLiquidity ? overnightHigh : na, "Overnight high", color = color.new(color.aqua, 40), style = plot.style_stepline)
+plot(showLiquidity ? overnightLow : na, "Overnight low", color = color.new(color.aqua, 40), style = plot.style_stepline)
+plot(activeDirection != 0 ? activeEntry : na, "Active entry", color = color.new(color.white, 25), linewidth = 1, style = plot.style_linebr)
+plot(activeDirection != 0 ? activeStop : na, "Active safe-level stop", color = color.red, linewidth = 2, style = plot.style_linebr)
+plot(activeDirection != 0 ? activeTarget : na, "Active liquidity target", color = color.lime, linewidth = 2, style = plot.style_linebr)
+
+plotshape(newBullBreak4h, title = "Bullish 4H structure change", style = shape.diamond, location = location.belowbar,
+     color = color.aqua, size = size.tiny, text = "4H+")
+plotshape(newBearBreak4h, title = "Bearish 4H structure change", style = shape.diamond, location = location.abovebar,
+     color = color.orange, size = size.tiny, text = "4H−")
+plotshape(longEntrySignal, title = "Long setup", style = shape.triangleup, location = location.belowbar,
+     color = color.lime, size = size.small, text = "L")
+plotshape(shortEntrySignal, title = "Short setup", style = shape.triangledown, location = location.abovebar,
+     color = color.red, size = size.small, text = "S")
+
+alertcondition(longEntrySignal, "NQ long setup", "NQ Top-Down: LONG setup confirmed on {{ticker}} {{interval}}.")
+alertcondition(shortEntrySignal, "NQ short setup", "NQ Top-Down: SHORT setup confirmed on {{ticker}} {{interval}}.")
+alertcondition(stopExitSignal, "Safe-level stop hit", "NQ Top-Down: safe-level stop hit on {{ticker}}.")
+alertcondition(targetExitSignal, "Liquidity target hit", "NQ Top-Down: liquidity target hit on {{ticker}}.")
+alertcondition(sessionExitSignal, "New York session exit", "NQ Top-Down: 16:00 New York session exit on {{ticker}}.")
+
+if enableDynamicAlerts and longEntrySignal
+    alert("NQ LONG | entry " + str.tostring(activeEntry, format.mintick) + " | stop " +
+         str.tostring(activeStop, format.mintick) + " | target " + str.tostring(activeTarget, format.mintick) +
+         " (" + activeTargetSource + ")", alert.freq_once_per_bar_close)
+if enableDynamicAlerts and shortEntrySignal
+    alert("NQ SHORT | entry " + str.tostring(activeEntry, format.mintick) + " | stop " +
+         str.tostring(activeStop, format.mintick) + " | target " + str.tostring(activeTarget, format.mintick) +
+         " (" + activeTargetSource + ")", alert.freq_once_per_bar_close)
+
+var table dashboard = table.new(position.top_right, 2, 11,
+     bgcolor = color.new(color.black, 0),
+     frame_color = color.new(color.white, 0), frame_width = 2,
+     border_color = color.new(color.gray, 20), border_width = 1)
+if barstate.islast and showDashboard
+    color header = color.rgb(18, 72, 140)
+    color labelCell = color.rgb(25, 25, 30)
+    color bullCell = color.rgb(22, 135, 70)
+    color bearCell = color.rgb(185, 45, 45)
+    color neutralCell = color.rgb(65, 65, 72)
+    table.cell(dashboard, 0, 0, "NQ TOP-DOWN", text_color = color.white, bgcolor = header,
+         text_size = size.large)
+    table.cell(dashboard, 1, 0, supportedChart ? timeframe.period + "m" : "USE 5m / 15m",
+         text_color = color.white, bgcolor = supportedChart ? header : color.red, text_size = size.large)
+    table.cell(dashboard, 0, 1, "Monthly", text_color = color.white, bgcolor = labelCell, text_size = size.normal)
+    table.cell(dashboard, 1, 1, monthBull ? "BULL" : monthBear ? "BEAR" : "FLAT",
+         text_color = color.white, bgcolor = monthBull ? bullCell : monthBear ? bearCell : neutralCell,
+         text_size = size.normal)
+    table.cell(dashboard, 0, 2, "Weekly", text_color = color.white, bgcolor = labelCell, text_size = size.normal)
+    table.cell(dashboard, 1, 2, weekBull ? "BULL" : weekBear ? "BEAR" : "FLAT",
+         text_color = color.white, bgcolor = weekBull ? bullCell : weekBear ? bearCell : neutralCell,
+         text_size = size.normal)
+    table.cell(dashboard, 0, 3, "Daily", text_color = color.white, bgcolor = labelCell, text_size = size.normal)
+    table.cell(dashboard, 1, 3, dayBull ? "BULL" : dayBear ? "BEAR" : "FLAT",
+         text_color = color.white, bgcolor = dayBull ? bullCell : dayBear ? bearCell : neutralCell,
+         text_size = size.normal)
+    table.cell(dashboard, 0, 4, "4H setup", text_color = color.white, bgcolor = labelCell, text_size = size.normal)
+    table.cell(dashboard, 1, 4, armedDirection == 1 ? "BULL ARMED" : armedDirection == -1 ? "BEAR ARMED" : "WAIT",
+         text_color = color.white, bgcolor = armedDirection == 1 ? bullCell : armedDirection == -1 ? bearCell : neutralCell,
+         text_size = size.normal)
+    table.cell(dashboard, 0, 5, "Prior POC", text_color = color.white, bgcolor = labelCell, text_size = size.normal)
+    table.cell(dashboard, 1, 5, na(priorRthPoc) ? "Collecting…" : str.tostring(priorRthPoc, format.mintick),
+         text_color = color.black, bgcolor = color.rgb(245, 205, 35), text_size = size.normal)
+    table.cell(dashboard, 0, 6, "Position", text_color = color.white, bgcolor = labelCell, text_size = size.normal)
+    table.cell(dashboard, 1, 6, activeDirection == 1 ? "LONG" : activeDirection == -1 ? "SHORT" : "FLAT",
+         text_color = color.white, bgcolor = activeDirection == 1 ? bullCell : activeDirection == -1 ? bearCell : neutralCell,
+         text_size = size.normal)
+    table.cell(dashboard, 0, 7, "Safe level", text_color = color.white, bgcolor = labelCell, text_size = size.normal)
+    table.cell(dashboard, 1, 7, na(activeStop) ? "—" : str.tostring(activeStop, format.mintick),
+         text_color = color.white, bgcolor = na(activeStop) ? neutralCell : color.rgb(180, 35, 35), text_size = size.normal)
+    table.cell(dashboard, 0, 8, "Target", text_color = color.white, bgcolor = labelCell, text_size = size.normal)
+    table.cell(dashboard, 1, 8, na(activeTarget) ? "—" : str.tostring(activeTarget, format.mintick) + "\n" + activeTargetSource,
+         text_color = na(activeTarget) ? color.white : color.black,
+         bgcolor = na(activeTarget) ? neutralCell : color.rgb(55, 205, 105), text_size = size.normal)
+    string resultText = str.tostring(completedWins) + " W  /  " + str.tostring(completedLosses) + " L"
+    if completedBreakevens > 0
+        resultText += "  /  " + str.tostring(completedBreakevens) + " BE"
+    int decidedTrades = completedWins + completedLosses
+    float winRate = decidedTrades > 0 ? 100.0 * completedWins / decidedTrades : na
+    string winRateText = na(winRate) ? "—" : str.tostring(winRate, "#.0") + "%"
+    table.cell(dashboard, 0, 9, "Results", text_color = color.white, bgcolor = labelCell, text_size = size.normal)
+    table.cell(dashboard, 1, 9, resultText, text_color = color.white,
+         bgcolor = completedWins > completedLosses ? bullCell : completedWins < completedLosses ? bearCell : neutralCell,
+         text_size = size.normal)
+    table.cell(dashboard, 0, 10, "Win rate", text_color = color.white, bgcolor = labelCell, text_size = size.normal)
+    table.cell(dashboard, 1, 10, winRateText, text_color = color.white,
+         bgcolor = na(winRate) ? neutralCell : winRate >= 50 ? bullCell : bearCell,
+         text_size = size.large)
+    for dashboardRow = 0 to 10
+        for dashboardColumn = 0 to 1
+            table.cell_set_text_size(dashboard, dashboardColumn, dashboardRow, size.tiny)

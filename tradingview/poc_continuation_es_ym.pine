@@ -1,0 +1,378 @@
+//@version=6
+indicator("POC Continuation ES/YM/NQ [Research]", "POC Continuation", overlay = true,
+     max_labels_count = 300, max_boxes_count = 200)
+
+// TradingView companion for the strongest tested bot in this workspace.
+// Validated markets: ES/MES and YM/MYM. NQ/MNQ is included for research only
+// because it failed the existing POC continuation validation.
+// Research indicator only: it draws and measures setups but never places orders.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inputs
+// ─────────────────────────────────────────────────────────────────────────────
+
+string GROUP_SETUP = "Validated setup"
+string GROUP_PROFILE = "Prior RTH volume profile"
+string GROUP_DISPLAY = "Display and alerts"
+string NY_TZ = "America/New_York"
+
+float atrMultiplier = input.float(0.25, "Stop = RTH ATR ×", minval = 0.05, step = 0.05, group = GROUP_SETUP)
+float rewardRisk = input.float(3.0, "Target reward/risk", minval = 0.5, step = 0.5, group = GROUP_SETUP)
+int atrPeriod = input.int(14, "RTH ATR sessions", minval = 2, maxval = 100, group = GROUP_SETUP)
+string rthSession = input.session("0930-1600", "New York RTH", group = GROUP_SETUP)
+
+float manualPocBin = input.float(0.0, "POC row size in points (0 = automatic)", minval = 0.0, step = 0.25,
+     group = GROUP_PROFILE, tooltip = "Automatic: ES/MES = 1 point; NQ/MNQ = 4 points; YM/MYM = 10 points.")
+
+bool showPositionBoxes = input.bool(true, "Show automatic risk/reward boxes", group = GROUP_DISPLAY)
+bool showTradeLabels = input.bool(true, "Show setup and exit labels", group = GROUP_DISPLAY)
+bool showDashboard = input.bool(true, "Show compact dashboard", group = GROUP_DISPLAY)
+bool shadeRth = input.bool(true, "Highlight New York RTH", group = GROUP_DISPLAY)
+bool enableDynamicAlerts = input.bool(false, "Send dynamic alert() messages", group = GROUP_DISPLAY,
+     tooltip = "After enabling, create an alert using 'Any alert() function call'.")
+
+bool isDow = syminfo.root == "YM" or syminfo.root == "MYM"
+bool isSP = syminfo.root == "ES" or syminfo.root == "MES"
+bool isNasdaq = syminfo.root == "NQ" or syminfo.root == "MNQ"
+bool validatedSymbol = isDow or isSP
+bool supportedSymbol = validatedSymbol or isNasdaq
+bool supportedChart = timeframe.isminutes and timeframe.multiplier == 5
+float automaticPocBin = isDow ? 10.0 : isNasdaq ? 4.0 : 1.0
+float pocStep = manualPocBin > 0 ? manualPocBin : automaticPocBin
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Prior completed RTH POC and true RTH ATR
+// ─────────────────────────────────────────────────────────────────────────────
+
+profilePoc(float basePrice, float rowSize, array<float> rows) =>
+    float result = na
+    if array.size(rows) > 0
+        float largest = array.max(rows)
+        int largestIndex = array.indexof(rows, largest)
+        result := basePrice + (largestIndex + 0.5) * rowSize
+    result
+
+bool inRth = not na(time(timeframe.period, rthSession, NY_TZ))
+bool newRth = inRth and not inRth[1]
+bool endRth = not inRth and inRth[1]
+bool armClose = hour(time_close, NY_TZ) == 9 and minute(time_close, NY_TZ) == 35
+bool cutoffClose = hour(time_close, NY_TZ) == 15 and minute(time_close, NY_TZ) == 0
+bool flattenClose = hour(time_close, NY_TZ) == 15 and minute(time_close, NY_TZ) == 55
+
+var array<float> rthProfile = array.new<float>(0)
+var array<float> rthTrueRanges = array.new<float>(0)
+var float profileBase = na
+var float currentRthHigh = na
+var float currentRthLow = na
+var float currentRthClose = na
+var float previousRthClose = na
+var float priorRthPoc = na
+var float priorRthAtr = na
+
+if newRth
+    array.clear(rthProfile)
+    profileBase := math.floor(low / pocStep) * pocStep
+    currentRthHigh := high
+    currentRthLow := low
+    currentRthClose := close
+
+if inRth
+    if na(profileBase)
+        profileBase := math.floor(low / pocStep) * pocStep
+    currentRthHigh := na(currentRthHigh) ? high : math.max(currentRthHigh, high)
+    currentRthLow := na(currentRthLow) ? low : math.min(currentRthLow, low)
+    currentRthClose := close
+
+    float firstPriceRow = math.floor(low / pocStep) * pocStep
+    float lastPriceRow = math.floor(high / pocStep) * pocStep
+    if firstPriceRow < profileBase
+        int prependCount = int(math.round((profileBase - firstPriceRow) / pocStep))
+        if prependCount > 0
+            for row = 0 to prependCount - 1
+                array.unshift(rthProfile, 0.0)
+        profileBase := firstPriceRow
+
+    int firstIndex = int(math.floor((firstPriceRow - profileBase) / pocStep + 0.000001))
+    int lastIndex = int(math.floor((lastPriceRow - profileBase) / pocStep + 0.000001))
+    while array.size(rthProfile) <= lastIndex
+        array.push(rthProfile, 0.0)
+    int touchedRows = math.max(1, lastIndex - firstIndex + 1)
+    float volumePerRow = nz(volume) / touchedRows
+    if lastIndex >= firstIndex
+        for row = firstIndex to lastIndex
+            array.set(rthProfile, row, array.get(rthProfile, row) + volumePerRow)
+
+if endRth and array.size(rthProfile) > 0
+    priorRthPoc := profilePoc(profileBase, pocStep, rthProfile)
+    float sessionRange = currentRthHigh - currentRthLow
+    float highGap = na(previousRthClose) ? sessionRange : math.abs(currentRthHigh - previousRthClose)
+    float lowGap = na(previousRthClose) ? sessionRange : math.abs(currentRthLow - previousRthClose)
+    float trueRange = math.max(sessionRange, math.max(highGap, lowGap))
+    array.push(rthTrueRanges, trueRange)
+    if array.size(rthTrueRanges) > atrPeriod
+        array.shift(rthTrueRanges)
+    if array.size(rthTrueRanges) == atrPeriod
+        priorRthAtr := array.avg(rthTrueRanges)
+    previousRthClose := currentRthClose
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Daily POC continuation plan
+// ─────────────────────────────────────────────────────────────────────────────
+
+// planState: 0 waiting, 1 pending POC entry, 2 open, 3 finished/cancelled.
+var int planState = 0
+var int planDirection = 0
+var int planArmedBar = na
+var int entryBar = na
+var float dayOpen = na
+var float planEntry = na
+var float planStop = na
+var float planTarget = na
+var float planRisk = na
+var box activeRiskBox = na
+var box activeRewardBox = na
+
+var int completedWins = 0
+var int completedLosses = 0
+var int completedBreakevens = 0
+var float totalR = 0.0
+var float grossWinningR = 0.0
+var float grossLosingR = 0.0
+var int statsStartedAt = na
+
+bool armedSignal = false
+bool longEntrySignal = false
+bool shortEntrySignal = false
+bool cutoffSignal = false
+bool stopExitSignal = false
+bool targetExitSignal = false
+bool sessionExitSignal = false
+
+if newRth
+    planState := 0
+    planDirection := 0
+    planArmedBar := na
+    entryBar := na
+    dayOpen := open
+    planEntry := na
+    planStop := na
+    planTarget := na
+    planRisk := na
+
+// Arm once the 09:30-09:35 opening bar has completed. Open below prior POC
+// means a rally into/through POC is a long continuation; open above is short.
+if armClose and planState == 0 and supportedChart and supportedSymbol and
+  not na(priorRthPoc) and not na(priorRthAtr) and priorRthPoc != dayOpen
+    planDirection := priorRthPoc > dayOpen ? 1 : -1
+    planEntry := priorRthPoc
+    planRisk := atrMultiplier * priorRthAtr
+    planStop := planDirection == 1 ? planEntry - planRisk : planEntry + planRisk
+    planTarget := planDirection == 1 ? planEntry + rewardRisk * planRisk : planEntry - rewardRisk * planRisk
+    planState := 1
+    planArmedBar := bar_index
+    armedSignal := true
+    if showTradeLabels
+        label.new(bar_index, planEntry,
+             (planDirection == 1 ? "LONG ARMED" : "SHORT ARMED") +
+             "\nPOC " + str.tostring(planEntry, format.mintick) +
+             "\nSL " + str.tostring(planStop, format.mintick) +
+             "\nTP " + str.tostring(planTarget, format.mintick),
+             style = planDirection == 1 ? label.style_label_up : label.style_label_down,
+             color = planDirection == 1 ? color.lime : color.red,
+             textcolor = planDirection == 1 ? color.black : color.white, size = size.small)
+
+// The entry can fill only after arming. The 14:55-15:00 bar remains eligible;
+// if it does not touch POC, the pending setup is cancelled at its close.
+if planState == 1 and bar_index > planArmedBar
+    bool touchedPoc = planDirection == 1 ? high >= planEntry : low <= planEntry
+    if touchedPoc
+        planState := 2
+        entryBar := bar_index
+        if na(statsStartedAt)
+            statsStartedAt := time
+        longEntrySignal := planDirection == 1
+        shortEntrySignal := planDirection == -1
+        if showPositionBoxes
+            if planDirection == 1
+                activeRiskBox := box.new(left = bar_index, top = planEntry, right = bar_index + 1, bottom = planStop,
+                     xloc = xloc.bar_index, border_color = color.new(color.red, 5), border_width = 1,
+                     bgcolor = color.new(color.red, 78), text = "1R RISK", text_color = color.white, text_size = size.tiny)
+                activeRewardBox := box.new(left = bar_index, top = planTarget, right = bar_index + 1, bottom = planEntry,
+                     xloc = xloc.bar_index, border_color = color.new(color.lime, 5), border_width = 1,
+                     bgcolor = color.new(color.lime, 82), text = str.tostring(rewardRisk) + "R REWARD",
+                     text_color = color.white, text_size = size.tiny)
+            else
+                activeRiskBox := box.new(left = bar_index, top = planStop, right = bar_index + 1, bottom = planEntry,
+                     xloc = xloc.bar_index, border_color = color.new(color.red, 5), border_width = 1,
+                     bgcolor = color.new(color.red, 78), text = "1R RISK", text_color = color.white, text_size = size.tiny)
+                activeRewardBox := box.new(left = bar_index, top = planEntry, right = bar_index + 1, bottom = planTarget,
+                     xloc = xloc.bar_index, border_color = color.new(color.lime, 5), border_width = 1,
+                     bgcolor = color.new(color.lime, 82), text = str.tostring(rewardRisk) + "R REWARD",
+                     text_color = color.white, text_size = size.tiny)
+        if showTradeLabels
+            label.new(bar_index, planEntry, planDirection == 1 ? "LONG FILLED" : "SHORT FILLED",
+                 style = planDirection == 1 ? label.style_label_up : label.style_label_down,
+                 color = planDirection == 1 ? color.lime : color.red,
+                 textcolor = planDirection == 1 ? color.black : color.white, size = size.small)
+    else if cutoffClose
+        planState := 3
+        cutoffSignal := true
+        if showTradeLabels
+            label.new(bar_index, planEntry, "ENTRY CANCELLED\n15:00 cutoff", style = label.style_label_left,
+                 color = color.new(color.gray, 15), textcolor = color.white, size = size.tiny)
+
+// Extend the visual position while it is open.
+if planState == 2 and showPositionBoxes
+    if not na(activeRiskBox)
+        box.set_right(activeRiskBox, bar_index + 1)
+    if not na(activeRewardBox)
+        box.set_right(activeRewardBox, bar_index + 1)
+
+// Conservatively record the stop first when a 5-minute bar reaches both stop
+// and target. Never resolve an exit inside the same bar that filled the entry.
+if planState == 2 and bar_index > entryBar
+    bool stopHit = planDirection == 1 ? low <= planStop : high >= planStop
+    bool targetHit = planDirection == 1 ? high >= planTarget : low <= planTarget
+    float outcomeR = na
+    if stopHit
+        outcomeR := -1.0
+        stopExitSignal := true
+    else if targetHit
+        outcomeR := rewardRisk
+        targetExitSignal := true
+    else if flattenClose
+        float points = planDirection == 1 ? close - planEntry : planEntry - close
+        outcomeR := points / planRisk
+        sessionExitSignal := true
+
+    if not na(outcomeR)
+        totalR += outcomeR
+        if outcomeR > 0.001
+            completedWins += 1
+            grossWinningR += outcomeR
+        else if outcomeR < -0.001
+            completedLosses += 1
+            grossLosingR += math.abs(outcomeR)
+        else
+            completedBreakevens += 1
+        if showTradeLabels
+            string exitText = stopExitSignal ? "STOP  −1R" : targetExitSignal ? "TARGET  +" +
+                 str.tostring(rewardRisk) + "R" : "15:55 EXIT  " + str.tostring(outcomeR, "#.##") + "R"
+            label.new(bar_index, close, exitText, style = label.style_label_left,
+                 color = outcomeR > 0 ? color.green : outcomeR < 0 ? color.red : color.gray,
+                 textcolor = color.white, size = size.small)
+        planState := 3
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Plots, alerts, and dashboard
+// ─────────────────────────────────────────────────────────────────────────────
+
+bgcolor(shadeRth and inRth ? color.new(color.blue, 94) : na, title = "New York RTH")
+plot(priorRthPoc, "Prior RTH POC", color = color.yellow, linewidth = 2, style = plot.style_stepline)
+plot(planState == 1 ? planEntry : na, "Pending POC entry", color = color.orange, linewidth = 3, style = plot.style_linebr)
+plot(planState == 2 ? planEntry : na, "Filled entry", color = color.white, linewidth = 1, style = plot.style_linebr)
+plot(planState == 1 or planState == 2 ? planStop : na, "Stop", color = color.red, linewidth = 2, style = plot.style_linebr)
+plot(planState == 1 or planState == 2 ? planTarget : na, "3R target", color = color.lime, linewidth = 2, style = plot.style_linebr)
+plot(inRth ? dayOpen : na, "RTH open", color = color.new(color.aqua, 35), style = plot.style_linebr)
+
+plotshape(longEntrySignal, title = "Long POC fill", style = shape.triangleup, location = location.belowbar,
+     color = color.lime, size = size.small, text = "POC L")
+plotshape(shortEntrySignal, title = "Short POC fill", style = shape.triangledown, location = location.abovebar,
+     color = color.red, size = size.small, text = "POC S")
+
+alertcondition(armedSignal, "POC setup armed", "POC Continuation: setup armed on {{ticker}}.")
+alertcondition(longEntrySignal, "POC long filled", "POC Continuation: LONG filled on {{ticker}} at prior POC.")
+alertcondition(shortEntrySignal, "POC short filled", "POC Continuation: SHORT filled on {{ticker}} at prior POC.")
+alertcondition(cutoffSignal, "POC entry cancelled", "POC Continuation: unfilled entry cancelled at 15:00 New York.")
+alertcondition(stopExitSignal, "POC stop hit", "POC Continuation: stop hit on {{ticker}}.")
+alertcondition(targetExitSignal, "POC target hit", "POC Continuation: 3R target hit on {{ticker}}.")
+alertcondition(sessionExitSignal, "POC session exit", "POC Continuation: position exited at 15:55 New York.")
+
+if enableDynamicAlerts and armedSignal
+    alert("POC " + (planDirection == 1 ? "LONG" : "SHORT") + " ARMED | entry " +
+         str.tostring(planEntry, format.mintick) + " | stop " + str.tostring(planStop, format.mintick) +
+         " | target " + str.tostring(planTarget, format.mintick), alert.freq_once_per_bar_close)
+if enableDynamicAlerts and longEntrySignal
+    alert("POC LONG FILLED | " + syminfo.ticker + " @ " + str.tostring(planEntry, format.mintick),
+         alert.freq_once_per_bar_close)
+if enableDynamicAlerts and shortEntrySignal
+    alert("POC SHORT FILLED | " + syminfo.ticker + " @ " + str.tostring(planEntry, format.mintick),
+         alert.freq_once_per_bar_close)
+
+var table dashboard = table.new(position.top_right, 2, 14,
+     bgcolor = color.new(color.black, 0),
+     frame_color = color.white, frame_width = 2,
+     border_color = color.new(color.gray, 20), border_width = 1)
+
+if barstate.islast and showDashboard
+    color header = color.rgb(18, 72, 140)
+    color labelCell = color.rgb(25, 25, 30)
+    color bullCell = color.rgb(22, 135, 70)
+    color bearCell = color.rgb(185, 45, 45)
+    color neutralCell = color.rgb(65, 65, 72)
+    string stateText = planState == 1 ? "PENDING" : planState == 2 ?
+      (planDirection == 1 ? "LONG OPEN" : "SHORT OPEN") : planState == 3 ? "DONE" : "WAIT 09:35"
+    color stateColor = planState == 2 ? (planDirection == 1 ? bullCell : bearCell) :
+      planState == 1 ? color.rgb(200, 125, 20) : neutralCell
+    int decidedTrades = completedWins + completedLosses
+    float winRate = decidedTrades > 0 ? 100.0 * completedWins / decidedTrades : na
+    float profitFactor = grossLosingR > 0 ? grossWinningR / grossLosingR : na
+    string resultText = str.tostring(completedWins) + " W / " + str.tostring(completedLosses) + " L"
+    if completedBreakevens > 0
+        resultText += " / " + str.tostring(completedBreakevens) + " BE"
+    string statsDate = na(statsStartedAt) ? "No fills yet" : str.format_time(statsStartedAt, "yyyy-MM-dd", NY_TZ)
+
+    table.cell(dashboard, 0, 0, "POC CONTINUATION", text_color = color.white, bgcolor = header, text_size = size.large)
+    table.cell(dashboard, 1, 0, supportedChart ? syminfo.root + "  5m" : "USE 5m",
+         text_color = color.white,
+         bgcolor = supportedChart and validatedSymbol ? header : supportedChart and isNasdaq ? color.rgb(200, 125, 20) : color.red,
+         text_size = size.large)
+    table.cell(dashboard, 0, 1, "Market status", text_color = color.white, bgcolor = labelCell, text_size = size.normal)
+    table.cell(dashboard, 1, 1, validatedSymbol ? "VALIDATED — ES/YM" : isNasdaq ? "NQ RESEARCH ONLY" : "UNSUPPORTED",
+         text_color = color.white, bgcolor = validatedSymbol ? bullCell : isNasdaq ? color.rgb(200, 125, 20) : bearCell,
+         text_size = size.normal)
+    table.cell(dashboard, 0, 2, "Status", text_color = color.white, bgcolor = labelCell, text_size = size.normal)
+    table.cell(dashboard, 1, 2, stateText, text_color = color.white, bgcolor = stateColor, text_size = size.normal)
+    table.cell(dashboard, 0, 3, "Prior POC", text_color = color.white, bgcolor = labelCell, text_size = size.normal)
+    table.cell(dashboard, 1, 3, na(priorRthPoc) ? "Collecting…" : str.tostring(priorRthPoc, format.mintick),
+         text_color = color.black, bgcolor = color.rgb(245, 205, 35), text_size = size.normal)
+    table.cell(dashboard, 0, 4, "RTH ATR(" + str.tostring(atrPeriod) + ")",
+         text_color = color.white, bgcolor = labelCell, text_size = size.normal)
+    table.cell(dashboard, 1, 4, na(priorRthAtr) ? "Collecting…" : str.tostring(priorRthAtr, "#.##"),
+         text_color = color.white, bgcolor = neutralCell, text_size = size.normal)
+    table.cell(dashboard, 0, 5, "Today open", text_color = color.white, bgcolor = labelCell, text_size = size.normal)
+    table.cell(dashboard, 1, 5, na(dayOpen) ? "—" : str.tostring(dayOpen, format.mintick),
+         text_color = color.white, bgcolor = neutralCell, text_size = size.normal)
+    table.cell(dashboard, 0, 6, "Direction", text_color = color.white, bgcolor = labelCell, text_size = size.normal)
+    table.cell(dashboard, 1, 6, planDirection == 1 ? "LONG" : planDirection == -1 ? "SHORT" : "—",
+         text_color = color.white, bgcolor = planDirection == 1 ? bullCell : planDirection == -1 ? bearCell : neutralCell,
+         text_size = size.normal)
+    table.cell(dashboard, 0, 7, "Entry", text_color = color.white, bgcolor = labelCell, text_size = size.normal)
+    table.cell(dashboard, 1, 7, na(planEntry) ? "—" : str.tostring(planEntry, format.mintick),
+         text_color = na(planEntry) ? color.white : color.black,
+         bgcolor = na(planEntry) ? neutralCell : color.orange, text_size = size.normal)
+    table.cell(dashboard, 0, 8, "Stop", text_color = color.white, bgcolor = labelCell, text_size = size.normal)
+    table.cell(dashboard, 1, 8, na(planStop) ? "—" : str.tostring(planStop, format.mintick),
+         text_color = color.white, bgcolor = na(planStop) ? neutralCell : bearCell, text_size = size.normal)
+    table.cell(dashboard, 0, 9, "Target", text_color = color.white, bgcolor = labelCell, text_size = size.normal)
+    table.cell(dashboard, 1, 9, na(planTarget) ? "—" : str.tostring(planTarget, format.mintick) + "  (" +
+         str.tostring(rewardRisk) + "R)", text_color = na(planTarget) ? color.white : color.black,
+         bgcolor = na(planTarget) ? neutralCell : color.rgb(55, 205, 105), text_size = size.normal)
+    table.cell(dashboard, 0, 10, "Results", text_color = color.white, bgcolor = labelCell, text_size = size.normal)
+    table.cell(dashboard, 1, 10, resultText, text_color = color.white,
+         bgcolor = completedWins > completedLosses ? bullCell : completedWins < completedLosses ? bearCell : neutralCell,
+         text_size = size.normal)
+    table.cell(dashboard, 0, 11, "Win rate", text_color = color.white, bgcolor = labelCell, text_size = size.normal)
+    table.cell(dashboard, 1, 11, na(winRate) ? "—" : str.tostring(winRate, "#.0") + "%",
+         text_color = color.white, bgcolor = na(winRate) ? neutralCell : winRate >= 40 ? bullCell : bearCell,
+         text_size = size.large)
+    table.cell(dashboard, 0, 12, "Gross R / PF", text_color = color.white, bgcolor = labelCell, text_size = size.normal)
+    table.cell(dashboard, 1, 12, str.tostring(totalR, "#.##") + "R  /  " +
+         (na(profitFactor) ? "—" : str.tostring(profitFactor, "#.##")),
+         text_color = color.white, bgcolor = totalR > 0 ? bullCell : totalR < 0 ? bearCell : neutralCell,
+         text_size = size.normal)
+    table.cell(dashboard, 0, 13, "Stats from", text_color = color.white, bgcolor = labelCell, text_size = size.normal)
+    table.cell(dashboard, 1, 13, statsDate, text_color = color.white, bgcolor = neutralCell, text_size = size.normal)
+    for dashboardRow = 0 to 13
+        for dashboardColumn = 0 to 1
+            table.cell_set_text_size(dashboard, dashboardColumn, dashboardRow, size.tiny)

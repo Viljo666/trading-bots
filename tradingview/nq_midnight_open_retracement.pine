@@ -1,0 +1,393 @@
+//@version=6
+indicator("NQ Midnight Open Retracement [Research]", "NQ OR → Midnight", overlay = true,
+     max_labels_count = 300, max_boxes_count = 200)
+
+// Separate comparison indicator for NQ/MNQ.  It never places orders.
+// Default rules were selected on cached NQ five-minute data with a chronological
+// holdout, then checked on a later June-August 2026 sample:
+//   1. Record the 00:00 New York futures open.
+//   2. Build the 09:30-09:45 opening range.
+//   3. Bias points from the 09:30 open toward the midnight open.
+//   4. Enter after a completed five-minute close breaks the opening range in
+//      that direction, no later than 10:30.
+//   5. Stop beyond the signal candle; target the midnight open.
+//   6. Reject weak reward/risk, distant targets, or >$200 planned MNQ risk.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inputs
+// ─────────────────────────────────────────────────────────────────────────────
+
+string GROUP_SETUP = "Opening range → midnight setup"
+string GROUP_RISK = "25K / one-MNQ research guard"
+string GROUP_DISPLAY = "Display and alerts"
+string NY_TZ = "America/New_York"
+
+int openingRangeMinutes = input.int(15, "Opening range minutes", options = [5, 15, 30], group = GROUP_SETUP)
+string entryCutoff = input.string("10:30", "Last entry", options = ["10:00", "10:30", "11:00"], group = GROUP_SETUP)
+float stopBuffer = input.float(0.5, "Stop beyond signal candle (points)", minval = 0.0, step = 0.25, group = GROUP_SETUP)
+float minRewardRisk = input.float(0.5, "Minimum reward/risk to midnight", minval = 0.1, step = 0.25, group = GROUP_SETUP)
+float maxDistanceAtr = input.float(0.5, "Maximum open-to-midnight distance (ATR)", minval = 0.05, step = 0.05, group = GROUP_SETUP)
+string flattenTime = input.string("15:55", "Flatten unresolved trade", options = ["11:00", "12:00", "15:55"], group = GROUP_SETUP)
+int atrPeriod = input.int(14, "Prior RTH ATR sessions", minval = 2, maxval = 100, group = GROUP_SETUP)
+
+float maxRiskDollars = input.float(200.0, "Maximum planned risk ($)", minval = 25.0, step = 5.0, group = GROUP_RISK)
+float mnqPointValue = input.float(2.0, "MNQ dollars per point", minval = 0.01, step = 0.25, group = GROUP_RISK)
+float roundTurnCost = input.float(4.0, "Estimated round-turn fees ($)", minval = 0.0, step = 0.25, group = GROUP_RISK)
+
+bool showOpeningRange = input.bool(true, "Show opening range", group = GROUP_DISPLAY)
+bool showPositionBoxes = input.bool(true, "Show risk/reward boxes", group = GROUP_DISPLAY)
+bool showTradeLabels = input.bool(true, "Show entry and exit labels", group = GROUP_DISPLAY)
+bool showDashboard = input.bool(true, "Show compact dashboard", group = GROUP_DISPLAY)
+bool shadeRth = input.bool(true, "Highlight New York RTH", group = GROUP_DISPLAY)
+
+string rthSession = "0930-1600"
+bool isNasdaq = syminfo.root == "NQ" or syminfo.root == "MNQ"
+bool supportedChart = timeframe.isminutes and timeframe.multiplier == 5
+bool supportedSetup = isNasdaq and supportedChart
+float tickSize = syminfo.mintick
+
+dateKey(int timestamp) =>
+    year(timestamp, NY_TZ) * 10000 + month(timestamp, NY_TZ) * 100 + dayofmonth(timestamp, NY_TZ)
+
+f_clockReached(string value, int timestamp) =>
+    int targetHour = int(str.tonumber(str.substring(value, 0, 2)))
+    int targetMinute = int(str.tonumber(str.substring(value, 3, 5)))
+    hour(timestamp, NY_TZ) > targetHour or
+         (hour(timestamp, NY_TZ) == targetHour and minute(timestamp, NY_TZ) >= targetMinute)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Midnight open and completed-session RTH ATR
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool inRth = not na(time(timeframe.period, rthSession, NY_TZ))
+bool newRth = inRth and not inRth[1]
+bool endRth = not inRth and inRth[1]
+bool atMidnight = hour(time, NY_TZ) == 0 and minute(time, NY_TZ) == 0
+
+var float midnightOpen = na
+var int midnightDate = na
+if atMidnight
+    midnightOpen := open
+    midnightDate := dateKey(time)
+
+bool midnightReady = not na(midnightOpen) and midnightDate == dateKey(time)
+
+var float currentRthHigh = na
+var float currentRthLow = na
+var float currentRthClose = na
+var float previousRthClose = na
+var array<float> rthTrueRanges = array.new<float>(0)
+var float priorRthAtr = na
+
+if newRth
+    currentRthHigh := high
+    currentRthLow := low
+    currentRthClose := close
+
+if inRth
+    currentRthHigh := na(currentRthHigh) ? high : math.max(currentRthHigh, high)
+    currentRthLow := na(currentRthLow) ? low : math.min(currentRthLow, low)
+    currentRthClose := close
+
+if endRth and not na(currentRthHigh) and not na(currentRthLow)
+    float sessionRange = currentRthHigh - currentRthLow
+    float highGap = na(previousRthClose) ? sessionRange : math.abs(currentRthHigh - previousRthClose)
+    float lowGap = na(previousRthClose) ? sessionRange : math.abs(currentRthLow - previousRthClose)
+    float trueRange = math.max(sessionRange, math.max(highGap, lowGap))
+    array.push(rthTrueRanges, trueRange)
+    if array.size(rthTrueRanges) > atrPeriod
+        array.shift(rthTrueRanges)
+    if array.size(rthTrueRanges) == atrPeriod
+        priorRthAtr := array.avg(rthTrueRanges)
+    previousRthClose := currentRthClose
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Opening range, causal signal, and position tracking
+// ─────────────────────────────────────────────────────────────────────────────
+
+// planState: 0 building/not ready, 1 waiting for range break, 2 position open,
+// 3 completed/cancelled/filtered.
+var int planState = 0
+var int planDirection = 0
+var int entryBar = na
+var float dayOpen = na
+var float openingHigh = na
+var float openingLow = na
+var float planEntry = na
+var float planStop = na
+var float planTarget = na
+var float planRiskPoints = na
+var float plannedRewardRisk = na
+var float plannedRiskDollars = na
+var float dayDistanceAtr = na
+var bool targetTouched = false
+var string filteredReason = ""
+var box activeRiskBox = na
+var box activeRewardBox = na
+
+var int completedWins = 0
+var int completedLosses = 0
+var float totalNetDollars = 0.0
+var float grossWinningDollars = 0.0
+var float grossLosingDollars = 0.0
+var float equityDollars = 0.0
+var float equityPeakDollars = 0.0
+var float maxDrawdownDollars = 0.0
+var int statsStartedAt = na
+
+bool entrySignal = false
+bool longEntrySignal = false
+bool shortEntrySignal = false
+bool stopExitSignal = false
+bool targetExitSignal = false
+bool sessionExitSignal = false
+bool filteredSignal = false
+bool cutoffSignal = false
+
+if newRth
+    planState := 0
+    planDirection := 0
+    entryBar := na
+    dayOpen := open
+    openingHigh := high
+    openingLow := low
+    planEntry := na
+    planStop := na
+    planTarget := midnightReady ? midnightOpen : na
+    planRiskPoints := na
+    plannedRewardRisk := na
+    plannedRiskDollars := na
+    dayDistanceAtr := midnightReady and not na(priorRthAtr) and priorRthAtr > 0 ? math.abs(dayOpen - midnightOpen) / priorRthAtr : na
+    targetTouched := false
+    filteredReason := ""
+    if midnightReady and midnightOpen != dayOpen
+        planDirection := midnightOpen > dayOpen ? 1 : -1
+
+int openingEndMinutes = 9 * 60 + 30 + openingRangeMinutes
+int barStartMinutes = hour(time, NY_TZ) * 60 + minute(time, NY_TZ)
+int barCloseMinutes = hour(time_close, NY_TZ) * 60 + minute(time_close, NY_TZ)
+bool buildingOpeningRange = inRth and barStartMinutes >= 9 * 60 + 30 and barStartMinutes < openingEndMinutes
+bool openingRangeJustClosed = inRth and barCloseMinutes == openingEndMinutes
+
+if buildingOpeningRange
+    openingHigh := na(openingHigh) ? high : math.max(openingHigh, high)
+    openingLow := na(openingLow) ? low : math.min(openingLow, low)
+
+bool touchesMidnightNow = inRth and planDirection != 0 and
+     (planDirection == 1 ? high >= midnightOpen : low <= midnightOpen)
+if touchesMidnightNow
+    targetTouched := true
+
+if openingRangeJustClosed and barstate.isconfirmed and planState == 0
+    bool distanceOkay = not na(dayDistanceAtr) and dayDistanceAtr <= maxDistanceAtr
+    if supportedSetup and midnightReady and not na(priorRthAtr) and planDirection != 0 and not targetTouched and distanceOkay
+        planState := 1
+    else
+        planState := 3
+        filteredReason := not supportedSetup ? "USE NQ/MNQ 5m" :
+             not midnightReady ? "NO MIDNIGHT DATA" :
+             na(priorRthAtr) ? "ATR WARMUP" :
+             targetTouched ? "TARGET ALREADY HIT" :
+             not distanceOkay ? "TOO FAR FROM MIDNIGHT" : "NO BIAS"
+
+bool beforeEntryCutoff = not f_clockReached(entryCutoff, time)
+bool breakTowardMidnight = planState == 1 and beforeEntryCutoff and
+     (planDirection == 1 ? close > openingHigh : close < openingLow)
+
+if breakTowardMidnight and barstate.isconfirmed
+    float candidateEntry = close + planDirection * tickSize
+    float candidateStop = planDirection == 1 ? low - stopBuffer : high + stopBuffer
+    float candidateRisk = planDirection * (candidateEntry - candidateStop)
+    float candidateReward = planDirection * (midnightOpen - candidateEntry)
+    float candidateRewardRisk = candidateRisk > 0 ? candidateReward / candidateRisk : na
+    float candidateRiskDollars = candidateRisk > 0 ? (candidateRisk + tickSize) * mnqPointValue + roundTurnCost : na
+    bool targetAvailable = not targetTouched and candidateReward > 0
+    bool rewardOkay = not na(candidateRewardRisk) and candidateRewardRisk >= minRewardRisk
+    bool riskOkay = not na(candidateRiskDollars) and candidateRiskDollars <= maxRiskDollars
+    if targetAvailable and rewardOkay and riskOkay
+        planEntry := candidateEntry
+        planStop := candidateStop
+        planTarget := midnightOpen
+        planRiskPoints := candidateRisk
+        plannedRewardRisk := candidateRewardRisk
+        plannedRiskDollars := candidateRiskDollars
+        planState := 2
+        entryBar := bar_index
+        entrySignal := true
+        longEntrySignal := planDirection == 1
+        shortEntrySignal := planDirection == -1
+        if na(statsStartedAt)
+            statsStartedAt := time
+        if showPositionBoxes
+            if planDirection == 1
+                activeRiskBox := box.new(bar_index, planEntry, bar_index + 1, planStop,
+                     border_color = color.red, bgcolor = color.new(color.red, 80), text = "MNQ RISK", text_color = color.white)
+                activeRewardBox := box.new(bar_index, planTarget, bar_index + 1, planEntry,
+                     border_color = color.lime, bgcolor = color.new(color.lime, 84), text = "MIDNIGHT TARGET", text_color = color.white)
+            else
+                activeRiskBox := box.new(bar_index, planStop, bar_index + 1, planEntry,
+                     border_color = color.red, bgcolor = color.new(color.red, 80), text = "MNQ RISK", text_color = color.white)
+                activeRewardBox := box.new(bar_index, planEntry, bar_index + 1, planTarget,
+                     border_color = color.lime, bgcolor = color.new(color.lime, 84), text = "MIDNIGHT TARGET", text_color = color.white)
+        if showTradeLabels
+            label.new(bar_index, planEntry,
+                 (planDirection == 1 ? "LONG OR BREAK" : "SHORT OR BREAK") +
+                 "\n1 MNQ | Risk $" + str.tostring(plannedRiskDollars, "#.00") +
+                 " | " + str.tostring(plannedRewardRisk, "#.00") + "R",
+                 style = planDirection == 1 ? label.style_label_up : label.style_label_down,
+                 color = planDirection == 1 ? color.lime : color.red,
+                 textcolor = planDirection == 1 ? color.black : color.white)
+    else
+        planState := 3
+        filteredSignal := true
+        filteredReason := not targetAvailable ? "MIDNIGHT ALREADY HIT" :
+             not rewardOkay ? "REWARD TOO SMALL" : "RISK ABOVE LIMIT"
+        if showTradeLabels
+            label.new(bar_index, close, "SKIP: " + filteredReason,
+                 style = label.style_label_left, color = color.gray, textcolor = color.white, size = size.tiny)
+
+int cutoffHour = int(str.tonumber(str.substring(entryCutoff, 0, 2)))
+int cutoffMinute = int(str.tonumber(str.substring(entryCutoff, 3, 5)))
+bool cutoffBarClose = hour(time_close, NY_TZ) == cutoffHour and minute(time_close, NY_TZ) == cutoffMinute
+if planState == 1 and cutoffBarClose and barstate.isconfirmed
+    planState := 3
+    cutoffSignal := true
+    filteredReason := "NO BREAK BY " + entryCutoff
+
+if planState == 2 and showPositionBoxes
+    if not na(activeRiskBox)
+        box.set_right(activeRiskBox, bar_index + 1)
+    if not na(activeRewardBox)
+        box.set_right(activeRewardBox, bar_index + 1)
+
+bool flattenBarClose = f_clockReached(flattenTime, time_close)
+if planState == 2 and bar_index > entryBar
+    bool stopHit = planDirection == 1 ? low <= planStop : high >= planStop
+    bool targetHit = planDirection == 1 ? high >= planTarget : low <= planTarget
+    float outcomeDollars = na
+    float exitLabelPrice = na
+    string exitText = ""
+    if stopHit
+        outcomeDollars := -(planRiskPoints + tickSize) * mnqPointValue - roundTurnCost
+        exitLabelPrice := planStop
+        exitText := "STOP"
+        stopExitSignal := true
+    else if targetHit
+        float rewardPoints = planDirection * (planTarget - planEntry)
+        outcomeDollars := rewardPoints * mnqPointValue - roundTurnCost
+        exitLabelPrice := planTarget
+        exitText := "MIDNIGHT HIT"
+        targetExitSignal := true
+    else if flattenBarClose and barstate.isconfirmed
+        float exitPrice = close - planDirection * tickSize
+        outcomeDollars := planDirection * (exitPrice - planEntry) * mnqPointValue - roundTurnCost
+        exitLabelPrice := exitPrice
+        exitText := "SESSION EXIT"
+        sessionExitSignal := true
+
+    if not na(outcomeDollars)
+        totalNetDollars += outcomeDollars
+        equityDollars += outcomeDollars
+        equityPeakDollars := math.max(equityPeakDollars, equityDollars)
+        maxDrawdownDollars := math.min(maxDrawdownDollars, equityDollars - equityPeakDollars)
+        if outcomeDollars > 0
+            completedWins += 1
+            grossWinningDollars += outcomeDollars
+        else
+            completedLosses += 1
+            grossLosingDollars += math.abs(outcomeDollars)
+        planState := 3
+        filteredReason := exitText
+        if showTradeLabels
+            label.new(bar_index, exitLabelPrice,
+                 exitText + "\n$" + str.tostring(outcomeDollars, "#.00"),
+                 style = outcomeDollars > 0 ? label.style_label_down : label.style_label_up,
+                 color = outcomeDollars > 0 ? color.green : color.maroon,
+                 textcolor = color.white, size = size.tiny)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Chart levels and alerts
+// ─────────────────────────────────────────────────────────────────────────────
+
+plot(midnightReady ? midnightOpen : na, "Midnight open", color = color.white, linewidth = 2, style = plot.style_linebr)
+plot(showOpeningRange and inRth ? openingHigh : na, "Opening range high", color = color.orange, linewidth = 1, style = plot.style_linebr)
+plot(showOpeningRange and inRth ? openingLow : na, "Opening range low", color = color.orange, linewidth = 1, style = plot.style_linebr)
+plot(planState == 2 ? planEntry : na, "Entry", color = color.aqua, linewidth = 1, style = plot.style_linebr)
+plot(planState == 2 ? planStop : na, "Stop", color = color.red, linewidth = 2, style = plot.style_linebr)
+plot(planState == 2 ? planTarget : na, "Target", color = color.lime, linewidth = 2, style = plot.style_linebr)
+
+bgcolor(shadeRth and inRth ? color.new(color.blue, 94) : na, title = "RTH shading")
+plotshape(longEntrySignal, title = "Long opening-range break", style = shape.triangleup,
+     location = location.belowbar, color = color.lime, size = size.small, text = "MO L")
+plotshape(shortEntrySignal, title = "Short opening-range break", style = shape.triangledown,
+     location = location.abovebar, color = color.red, size = size.small, text = "MO S")
+
+alertcondition(longEntrySignal, "MNQ long toward midnight",
+     'MNQ LONG OR→MIDNIGHT | Entry {{plot("Entry")}} | SL {{plot("Stop")}} | TP {{plot("Target")}}')
+alertcondition(shortEntrySignal, "MNQ short toward midnight",
+     'MNQ SHORT OR→MIDNIGHT | Entry {{plot("Entry")}} | SL {{plot("Stop")}} | TP {{plot("Target")}}')
+alertcondition(stopExitSignal, "MNQ midnight stop hit", "MNQ OR→Midnight: stop hit.")
+alertcondition(targetExitSignal, "MNQ midnight target hit", "MNQ OR→Midnight: midnight target hit.")
+alertcondition(sessionExitSignal, "MNQ midnight session exit", "MNQ OR→Midnight: session exit.")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Compact mobile-friendly comparison dashboard
+// ─────────────────────────────────────────────────────────────────────────────
+
+var table dashboard = table.new(position.bottom_right, 2, 18,
+     bgcolor = color.black, frame_color = color.white, frame_width = 2,
+     border_color = color.new(color.gray, 20), border_width = 1)
+
+if barstate.islast and showDashboard
+    int trades = completedWins + completedLosses
+    float winRate = trades > 0 ? 100.0 * completedWins / trades : na
+    float profitFactor = grossLosingDollars > 0 ? grossWinningDollars / grossLosingDollars : na
+    string biasText = planDirection == 1 ? "LONG TO MIDNIGHT" : planDirection == -1 ? "SHORT TO MIDNIGHT" : "NONE"
+    color biasColor = planDirection == 1 ? color.green : planDirection == -1 ? color.red : color.gray
+    string stateText = planState == 0 ? "BUILDING OR" : planState == 1 ? "WAIT BREAK" : planState == 2 ? "IN TRADE" : filteredReason
+    string statsDate = na(statsStartedAt) ? "No trades yet" : str.format_time(statsStartedAt, "yyyy-MM-dd", NY_TZ)
+    color leftCell = color.rgb(25, 25, 30)
+    color valueCell = color.rgb(63, 65, 74)
+
+    table.cell(dashboard, 0, 0, "OR → MIDNIGHT", bgcolor = color.rgb(43, 82, 145), text_color = color.white, text_size = size.large)
+    table.cell(dashboard, 1, 0, "RESEARCH", bgcolor = color.rgb(125, 70, 155), text_color = color.white, text_size = size.large)
+    table.cell(dashboard, 0, 1, "Chart", bgcolor = leftCell, text_color = color.white)
+    table.cell(dashboard, 1, 1, supportedSetup ? "NQ/MNQ 5m" : "USE NQ/MNQ 5m", bgcolor = supportedSetup ? color.green : color.red, text_color = color.white)
+    table.cell(dashboard, 0, 2, "Status", bgcolor = leftCell, text_color = color.white)
+    table.cell(dashboard, 1, 2, stateText, bgcolor = planState == 2 ? color.orange : valueCell, text_color = color.white)
+    table.cell(dashboard, 0, 3, "Midnight open", bgcolor = leftCell, text_color = color.white)
+    table.cell(dashboard, 1, 3, na(midnightOpen) ? "NEED ETH DATA" : str.tostring(midnightOpen, format.mintick), bgcolor = color.rgb(210, 175, 35), text_color = color.black)
+    table.cell(dashboard, 0, 4, "09:30 open", bgcolor = leftCell, text_color = color.white)
+    table.cell(dashboard, 1, 4, na(dayOpen) ? "—" : str.tostring(dayOpen, format.mintick), bgcolor = valueCell, text_color = color.white)
+    table.cell(dashboard, 0, 5, str.tostring(openingRangeMinutes) + "m range", bgcolor = leftCell, text_color = color.white)
+    table.cell(dashboard, 1, 5, na(openingHigh) ? "—" : str.tostring(openingLow, format.mintick) + " – " + str.tostring(openingHigh, format.mintick), bgcolor = valueCell, text_color = color.white)
+    table.cell(dashboard, 0, 6, "Bias", bgcolor = leftCell, text_color = color.white)
+    table.cell(dashboard, 1, 6, biasText, bgcolor = biasColor, text_color = color.white)
+    table.cell(dashboard, 0, 7, "Distance / ATR", bgcolor = leftCell, text_color = color.white)
+    table.cell(dashboard, 1, 7, na(dayDistanceAtr) ? "—" : str.tostring(dayDistanceAtr, "#.00"), bgcolor = na(dayDistanceAtr) or dayDistanceAtr > maxDistanceAtr ? color.red : color.green, text_color = color.white)
+    table.cell(dashboard, 0, 8, "Entry", bgcolor = leftCell, text_color = color.white)
+    table.cell(dashboard, 1, 8, na(planEntry) ? "—" : str.tostring(planEntry, format.mintick), bgcolor = color.aqua, text_color = color.black)
+    table.cell(dashboard, 0, 9, "Stop", bgcolor = leftCell, text_color = color.white)
+    table.cell(dashboard, 1, 9, na(planStop) ? "—" : str.tostring(planStop, format.mintick), bgcolor = color.red, text_color = color.white)
+    table.cell(dashboard, 0, 10, "Target", bgcolor = leftCell, text_color = color.white)
+    table.cell(dashboard, 1, 10, na(planTarget) ? "—" : str.tostring(planTarget, format.mintick), bgcolor = color.green, text_color = color.white)
+    table.cell(dashboard, 0, 11, "Planned R / risk", bgcolor = leftCell, text_color = color.white)
+    table.cell(dashboard, 1, 11, na(plannedRewardRisk) ? "—" : str.tostring(plannedRewardRisk, "#.00") + "R / $" + str.tostring(plannedRiskDollars, "#.00"), bgcolor = valueCell, text_color = color.white)
+    table.cell(dashboard, 0, 12, "Results", bgcolor = leftCell, text_color = color.white)
+    table.cell(dashboard, 1, 12, str.tostring(completedWins) + " W / " + str.tostring(completedLosses) + " L", bgcolor = valueCell, text_color = color.white)
+    table.cell(dashboard, 0, 13, "Win rate", bgcolor = leftCell, text_color = color.white)
+    table.cell(dashboard, 1, 13, na(winRate) ? "—" : str.tostring(winRate, "#.0") + "%", bgcolor = na(winRate) ? valueCell : winRate >= 60 ? color.green : color.red, text_color = color.white)
+    table.cell(dashboard, 0, 14, "Net $ / PF", bgcolor = leftCell, text_color = color.white)
+    table.cell(dashboard, 1, 14, "$" + str.tostring(totalNetDollars, "#.00") + " / " + (na(profitFactor) ? "—" : str.tostring(profitFactor, "#.00")), bgcolor = totalNetDollars >= 0 ? color.green : color.red, text_color = color.white)
+    table.cell(dashboard, 0, 15, "Max drawdown", bgcolor = leftCell, text_color = color.white)
+    table.cell(dashboard, 1, 15, "$" + str.tostring(maxDrawdownDollars, "#.00"), bgcolor = color.rgb(120, 45, 45), text_color = color.white)
+    table.cell(dashboard, 0, 16, "Rules", bgcolor = leftCell, text_color = color.white)
+    table.cell(dashboard, 1, 16, str.tostring(openingRangeMinutes) + "m / close / 1 MNQ", bgcolor = valueCell, text_color = color.white)
+    table.cell(dashboard, 0, 17, "Stats from", bgcolor = leftCell, text_color = color.white)
+    table.cell(dashboard, 1, 17, statsDate, bgcolor = valueCell, text_color = color.white)
+    for dashboardRow = 0 to 17
+        for dashboardColumn = 0 to 1
+            table.cell_set_text_size(dashboard, dashboardColumn, dashboardRow, size.tiny)
+
+if barstate.islast and not showDashboard
+    table.clear(dashboard, 0, 0, 1, 17)
