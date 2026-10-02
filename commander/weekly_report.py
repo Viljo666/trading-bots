@@ -87,8 +87,12 @@ def build() -> str:
             f"*{key}*: {len(setups)} setups (expect ~{exp['per_week']:.0f}/wk){flag}\n"
             f"  {detail}\n"
             f"  restarts {restarts} · errors {errors} · _{exp['note']}_")
-    parts.append("_Dry mode: no fills to score yet. After golive, this report "
-                 "adds realized R vs expectancy (poc +0.25R, sweep +0.28R)._")
+    parts.append("_Dry mode: no broker fills to score. Shadow outcomes below are "
+                 "price-bar estimates before costs; they are not live results._")
+    # Imported here so this script remains runnable both from launchd and from
+    # the Telegram command module in the same directory.
+    import governor
+    parts.append(governor.build())
     return "\n".join(parts)
 
 

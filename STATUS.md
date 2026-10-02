@@ -1,10 +1,10 @@
-# Bot Status — PARKED 2026-06-03
+# Original Alpaca Bot Status — UPDATED 2026-09-13
 
 Decision: keep the bot running as-is on paper, revise later. No real money.
 
 ## What's running
 
-- **One** `main.py` process, auto-started weekdays 08:00 local by launchd
+- `main.py` auto-starts weekdays 08:00 local by launchd
   (`~/Library/LaunchAgents/com.villerajala.trading-bot.plist`).
 - Paper account, ~$105.9k equity (started $100k on 2026-04-22).
 - Telegram alerts active.
@@ -41,7 +41,7 @@ Tested across multiple windows. **Nothing reliably beats SPY.**
 | ORB + reversal | bled in live, removed |
 | ORB + swing carry | never triggers (= ORB-only) |
 | Core 70/30 SPY+bot | structurally can't beat SPY |
-| Momentum swing (daily) | ties SPY, ~20% lower drawdown |
+| Momentum swing (daily, corrected timing + 5 bps/side) | materially lagged SPY |
 | **Dual Momentum (GEM)** | **underperformed SPY even with 2022 bear included** |
 
 Dual Momentum 5-yr (2021-05 → 2026-06, incl. 2022 bear):
@@ -59,12 +59,16 @@ The available data window (no long grinding bear) is buy-and-hold's best case.
 2. Dual Momentum still has a real role: drawdown protection in a LONG bear
    (1970s/2008-style), which our data can't test. If you fear a multi-year
    grind, it's a defensible allocation — just not an alpha source.
-3. Momentum swing — ties SPY with less drawdown; same caveat.
-   Code for both lives in `strategy_lab.py` (`--dual-momentum`, momentum table).
+3. Long-only stock momentum is now running as a **shadow-only** forward test.
+   Its corrected historical result did not pass the promotion bar: 2-year return
+   +26.25% vs SPY +40.97%, with max drawdown -17.47% vs -18.76%. It remains an
+   experiment, not a candidate for real money.
 
 ## Tooling
 
 - `backtest.py` — intraday walk-forward. Flags: `--be-trigger`, `--trend-filter`,
   `--orb-swing`, `--etfs-only`, `--months`.
-- `strategy_lab.py` — fast daily-bar lab (momentum swing, core-satellite, SPY).
-- Both are backtest-only; neither touches the live bot.
+- `strategy_lab.py` — corrected daily-bar lab (next-open fills, adjusted bars,
+  5 bps slippage each way).
+- `momentum_shadow.py` — separate virtual $100k forward portfolio; runs weekdays
+  at 23:30 local, journals to `journal/momentum_shadow_*.md`, and never sends orders.

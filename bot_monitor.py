@@ -20,15 +20,25 @@ BOTS = {
         "match": ["main.py"],
         "log": BASE / "logs" / f"{datetime.now().strftime('%Y-%m-%d')}.log",
     },
-    "tori_futures": {
-        "label": "Tori Futures (live.py)",
-        "match": ["tori_futures/live.py", "tori_futures\\live.py"],
-        "log": BASE / "tori_futures" / "launchd.out.log",
+    "tsmom": {
+        "label": "TSMOM (daily IBKR paper)",
+        "match": ["tsmom/live_daily.py", "tsmom\\live_daily.py"],
+        "log": BASE / "tsmom" / "daily_log.jsonl",
+    },
+    "poc_futures": {
+        "label": "POC Futures (dry)",
+        "match": ["poc_futures/live.py", "poc_futures\\live.py"],
+        "log": BASE / "poc_futures" / "live_log.jsonl",
+    },
+    "sweep_futures": {
+        "label": "Sweep Futures (dry)",
+        "match": ["sweep_futures/live.py", "sweep_futures\\live.py"],
+        "log": BASE / "sweep_futures" / "live_log.jsonl",
     },
     "crypto_scalper": {
         "label": "Crypto Scalper",
         "match": ["crypto_scalper/live.py", "crypto_scalper\\live.py"],
-        "log": BASE / "crypto_scalper" / "logs" / "live.log",
+        "log": BASE / "crypto_scalper" / "logs" / "launchd.out.log",
     },
 }
 
@@ -37,7 +47,7 @@ def get_processes():
     """Return list of running Python processes with their command lines."""
     try:
         result = subprocess.run(
-            ["ps", "aux"],
+            ["ps", "-axo", "pid=,%cpu=,%mem=,etime=,command="],
             capture_output=True, text=True, timeout=10
         )
         return result.stdout
@@ -61,15 +71,14 @@ def check_bot(bot_key, bot_cfg, ps_output):
     # Search ps output for this bot
     for match in bot_cfg["match"]:
         for line in ps_output.splitlines():
-            if match in line and "grep" not in line and "bot_monitor" not in line:
-                parts = line.split()
-                if len(parts) > 10:
+            if match in line and "bot_monitor" not in line:
+                parts = line.strip().split(maxsplit=4)
+                if len(parts) == 5:
                     status["running"] = True
-                    status["pid"] = parts[1]
-                    status["cpu"] = parts[2] + "%"
-                    status["mem"] = parts[3] + "%"
-                    # elapsed time is in column 9 (etime) when using ps aux
-                    status["uptime"] = parts[9] if len(parts) > 9 else None
+                    status["pid"] = parts[0]
+                    status["cpu"] = parts[1] + "%"
+                    status["mem"] = parts[2] + "%"
+                    status["uptime"] = parts[3]
                 break
         if status["running"]:
             break
@@ -111,8 +120,10 @@ def main():
         report["bots"][key] = check_bot(key, cfg, ps_output)
 
     out_path = BASE / "status.json"
-    with open(out_path, "w") as f:
+    tmp_path = out_path.with_suffix(".tmp")
+    with open(tmp_path, "w") as f:
         json.dump(report, f, indent=2)
+    tmp_path.replace(out_path)
 
     # Also print summary to stdout (captured by launchd)
     running = [v["label"] for v in report["bots"].values() if v["running"]]

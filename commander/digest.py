@@ -20,6 +20,9 @@ import requests
 from dotenv import load_dotenv
 
 PROJECT = Path(__file__).resolve().parent.parent
+if str(PROJECT) not in sys.path:
+    sys.path.insert(0, str(PROJECT))
+import macro_calendar
 load_dotenv(PROJECT / ".env")
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -147,6 +150,7 @@ def build() -> str:
     since = datetime.now(timezone.utc) - timedelta(hours=WINDOW_H)
     parts = [f"☀️ *Morning digest* — last {WINDOW_H}h",
              gateway_summary(since),
+             macro_calendar.briefing(),
              summarize_bot("poc (MYM/MES)", "com.villerajala.pocfutures",
                            PROJECT / "poc_futures" / "launchd.out.log", since),
              summarize_bot("sweep (MNQ/MCL)", "com.villerajala.sweepfutures",

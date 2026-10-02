@@ -28,6 +28,7 @@ import os
 import plistlib
 import random
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,6 +87,12 @@ HELP = (
     "`gateway restart now` — force Gateway relogin\n"
     "`digest` — 24h summary (auto 09:00 Mon-Sat)\n"
     "`report` — weekly setups vs backtest (auto Sun)\n"
+    "`governor` — evidence-only strategy review\n"
+    "`quality` — entry/exit quality of dry setups\n"
+    "`gate` — promotion requirements; never auto-switches\n"
+    "`macro` — upcoming CPI/NFP/FOMC advisory\n"
+    "`stress` — monthly drawdown stress test\n"
+    "`audit` — read-only paper-fill reconciliation\n"
     f"bots: {', '.join(BOTS)}"
 )
 
@@ -138,6 +145,10 @@ def plist_path(label: str) -> Path:
 
 
 def bot_mode(spec: BotSpec) -> str:
+    # These bots have no dry/live toggle, but neither is connected to a live
+    # money account.  Do not label them "live" in the phone status screen.
+    if spec.key in {"crypto", "tsmom"}:
+        return "paper"
     if not spec.supports_dry:
         return "live"
     try:
@@ -249,12 +260,12 @@ def gateway_status() -> str:
 
 
 def gateway_restart() -> str:
-    """Force a full Gateway recycle: unload agent, kill leftovers, reload, wait."""
-    _run(["launchctl", "unload", str(GATEWAY_PLIST)])
+    """Force a full Gateway recycle and wait for its paper API to return."""
+    _run(["launchctl", "bootout", f"gui/{UID}/{GATEWAY_LABEL}"])
     for pat in ("IbcGateway", "ibcstart", "start_gateway_paper"):
         subprocess.run(["pkill", "-f", pat], capture_output=True)
     time.sleep(8)
-    rc, out = _run(["launchctl", "load", str(GATEWAY_PLIST)])
+    rc, out = _run(["launchctl", "bootstrap", f"gui/{UID}", str(GATEWAY_PLIST)])
     if rc != 0:
         return f"⚠️ reload failed: {out[:150]}"
     send("♻️ Gateway recycling — waiting for login (up to 5 min)…")
@@ -304,6 +315,26 @@ def handle(text: str) -> str:
     if cmd == "report":
         import weekly_report
         return weekly_report.build()
+    if cmd == "governor":
+        import governor
+        return governor.build()
+    if cmd == "quality":
+        import trade_quality
+        return trade_quality.build()
+    if cmd == "gate":
+        import trade_quality
+        return trade_quality.promotion_gate()
+    if cmd == "macro":
+        if str(PROJECT) not in sys.path:
+            sys.path.insert(0, str(PROJECT))
+        import macro_calendar
+        return macro_calendar.briefing()
+    if cmd == "stress":
+        import stress_test
+        return stress_test.build()
+    if cmd == "audit":
+        import execution_audit
+        return execution_audit.build()
     if cmd == "gateway":
         if args and args[0] == "restart":
             if "now" not in args:
