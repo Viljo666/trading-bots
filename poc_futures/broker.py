@@ -10,7 +10,6 @@ from __future__ import annotations
 import random
 import time
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Optional
 
 import pandas as pd
@@ -18,14 +17,9 @@ from ib_insync import IB, Future, LimitOrder, MarketOrder, StopOrder
 
 from config import SESSION
 
-ALERT_FLAG = Path(__file__).resolve().parent / ".gateway_alert_sent"
 
-
-def connect_paper(max_attempts: int = 60, retry_delay_sec: float = 30.0) -> IB:
-    try:
-        import notify
-    except Exception:
-        notify = None  # type: ignore
+def connect_paper(max_attempts: int = 1, retry_delay_sec: float = 0.0) -> IB:
+    """Make a bounded connection attempt; live.py owns retrying and alerts."""
     last_err: Optional[Exception] = None
     for attempt in range(1, max_attempts + 1):
         ib = IB()
@@ -33,7 +27,6 @@ def connect_paper(max_attempts: int = 60, retry_delay_sec: float = 30.0) -> IB:
             ib.connect(SESSION.paper_host, SESSION.paper_port,
                        clientId=random.randint(100, 9999), readonly=False, timeout=15)
             if ib.isConnected():
-                ALERT_FLAG.unlink(missing_ok=True)
                 try:
                     ib.reqMarketDataType(3)
                 except Exception:
@@ -45,10 +38,8 @@ def connect_paper(max_attempts: int = 60, retry_delay_sec: float = 30.0) -> IB:
                 ib.disconnect()
             except Exception:
                 pass
-        if notify and attempt == 3 and not ALERT_FLAG.exists():
-            notify.gateway_unreachable(attempt)
-            ALERT_FLAG.touch()
-        time.sleep(retry_delay_sec)
+        if attempt < max_attempts and retry_delay_sec > 0:
+            time.sleep(retry_delay_sec)
     raise RuntimeError(f"Could not connect to IB paper on port {SESSION.paper_port}: {last_err}")
 
 
@@ -99,15 +90,18 @@ def place_entry_bracket(ib: IB, contract: Future, side: str, qty: int,
 
     parent = StopOrder(action, qty, r(entry_stop))
     parent.orderId = ib.client.getReqId()
+    parent.orderRef = "poc_futures"
     parent.transmit = False
 
     tp = LimitOrder(exit_action, qty, r(target))
     tp.orderId = ib.client.getReqId()
+    tp.orderRef = "poc_futures"
     tp.parentId = parent.orderId
     tp.ocaGroup = oca; tp.ocaType = 1; tp.transmit = False
 
     sl = StopOrder(exit_action, qty, r(stop_loss))
     sl.orderId = ib.client.getReqId()
+    sl.orderRef = "poc_futures"
     sl.parentId = parent.orderId
     sl.ocaGroup = oca; sl.ocaType = 1; sl.transmit = True
 

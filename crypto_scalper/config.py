@@ -13,6 +13,8 @@ ROOT = Path(__file__).parent
 LOG_DIR = ROOT / "logs"
 JOURNAL_DIR = ROOT / "journal"
 DATA_DIR = ROOT / "data"
+RUNNER_STATE_FILE = ROOT / "runner_state.json"
+PAPER_STATE_FILE = ROOT / "paper_state.json"
 for d in (LOG_DIR, JOURNAL_DIR, DATA_DIR):
     d.mkdir(exist_ok=True)
 

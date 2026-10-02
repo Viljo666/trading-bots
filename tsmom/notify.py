@@ -35,7 +35,13 @@ def send(text: str) -> None:
         log.warning("Telegram send failed: %s", e)
 
 
-def daily_summary(rebalances: list[dict], dry_run: bool) -> None:
+def daily_summary(
+    rebalances: list[dict],
+    dry_run: bool,
+    execution: list[dict] | None = None,
+    integrity: str | None = None,
+    safety_notes: list[str] | None = None,
+) -> None:
     """rebalances: list of {symbol, forecast, target, current, order}"""
     tag = "🧪 TSMOM dry-run" if dry_run else "📊 TSMOM daily rebalance"
     lines = [f"*{tag}*"]
@@ -51,6 +57,21 @@ def daily_summary(rebalances: list[dict], dry_run: bool) -> None:
         lines.append(
             f"`{r['symbol']:4s}` fc {r['forecast']:+.0f}  tgt {r['target']:+d} (have {r['current']:+d}){arrow}"
         )
+    if execution:
+        lines.append("")
+        for result in execution:
+            mark = "✅" if result.get("ok") else "⚠️"
+            fill = f"{result.get('filled', 0):g}/{result.get('expected', 0):g}"
+            lines.append(
+                f"{mark} `{result['symbol']}` {result['side']} {result['qty']} — "
+                f"{result.get('status', 'unknown')} ({fill} filled)"
+            )
+    if safety_notes:
+        lines.append("")
+        lines.extend(f"⚠️ {note}" for note in safety_notes[:5])
+    if integrity:
+        lines.append("")
+        lines.append(f"*{integrity}*")
     send("\n".join(lines))
 
 

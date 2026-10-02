@@ -16,6 +16,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 ROOT = Path(__file__).resolve().parent
 LOG_FILE = ROOT / "live_log.jsonl"
+STATE_FILE = ROOT / "state.json"
 
 
 @dataclass(frozen=True)

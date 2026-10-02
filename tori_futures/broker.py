@@ -279,7 +279,8 @@ async def fetch_15m_bars_async(ib: IB, contract: Future, duration: str = "60 D")
     return LiveBarsHandle(ib=ib, bars=bars)
 
 
-def place_market(ib: IB, contract: Future, side: str, quantity: int = 1, outside_rth: bool = False):
+def place_market(ib: IB, contract: Future, side: str, quantity: int = 1,
+                 outside_rth: bool = False, order_ref: str | None = None):
     """Place a market order. `side` must be 'BUY' or 'SELL'.
 
     `outside_rth=True` lets the order fill outside regular trading hours and uses
@@ -290,6 +291,8 @@ def place_market(ib: IB, contract: Future, side: str, quantity: int = 1, outside
     if side not in ("BUY", "SELL"):
         raise ValueError(f"invalid side {side}")
     order = MarketOrder(side, quantity)
+    if order_ref:
+        order.orderRef = order_ref
     if outside_rth:
         order.outsideRth = True
         order.tif = "GTC"

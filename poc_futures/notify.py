@@ -61,6 +61,10 @@ def error(symbol, msg: str) -> None:
     send(f"⚠️ {prefix}{msg[:300]}")
 
 
+def risk_blocked(symbol: str, reason: str) -> None:
+    send(f"🛡️ *{symbol}* setup blocked by shared futures risk guard\n_{reason[:250]}_")
+
+
 def shutdown() -> None:
     send("*POC bot stopped*")
 

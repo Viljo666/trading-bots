@@ -9,6 +9,7 @@ import ccxt
 import pandas as pd
 
 from config import EXCHANGE
+from market_data import OhlcvCache
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ class Broker:
             self.ex.set_sandbox_mode(True)
         self.symbol = EXCHANGE.symbol
         self.ex.load_markets()
+        self._ohlcv_caches: dict[str, OhlcvCache] = {}
         self._set_leverage(EXCHANGE.leverage)
 
     def _set_leverage(self, lev: int) -> None:
@@ -67,11 +69,9 @@ class Broker:
 
     # ---- Market data ----
     def ohlcv(self, timeframe: str = "1m", limit: int = 500) -> pd.DataFrame:
-        raw = self.ex.fetch_ohlcv(self.symbol, timeframe=timeframe, limit=limit)
-        df = pd.DataFrame(raw, columns=["ts", "open", "high", "low", "close", "volume"])
-        df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
-        df = df.set_index("ts")
-        return df
+        if timeframe not in self._ohlcv_caches:
+            self._ohlcv_caches[timeframe] = OhlcvCache(self.ex, self.symbol, timeframe)
+        return self._ohlcv_caches[timeframe].get(limit)
 
     def best_bid_ask(self) -> tuple[float, float]:
         ob = self.ex.fetch_order_book(self.symbol, limit=5)

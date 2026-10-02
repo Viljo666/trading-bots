@@ -17,12 +17,12 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 
 import ccxt
 import pandas as pd
 
-from config import EXCHANGE, JOURNAL_DIR, RISK
+from config import EXCHANGE, JOURNAL_DIR, PAPER_STATE_FILE, RISK
+from market_data import OhlcvCache
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +46,7 @@ class PaperBroker:
         self.ex = cls({"enableRateLimit": True})
         self.symbol = EXCHANGE.symbol
         self.ex.load_markets()
+        self._ohlcv_caches: dict[str, OhlcvCache] = {}
 
         self._cash = RISK.account_size_usdt
         self._side = "flat"           # "long" / "short" / "flat"
@@ -55,8 +56,71 @@ class PaperBroker:
         self._open_orders: dict[str, dict] = {}
         self._last_bid = 0.0
         self._last_ask = 0.0
+        self._trial_started_at: str | None = None
         self._journal_path = JOURNAL_DIR / f"paper_{datetime.now(timezone.utc):%Y%m%d}.jsonl"
+        self._restore_state()
         log.info("PaperBroker initialised: equity=%.2f, journal=%s", self._cash, self._journal_path)
+
+    def _restore_state(self) -> None:
+        """Resume the simulated account after a bot or machine restart."""
+        try:
+            if PAPER_STATE_FILE.exists():
+                with PAPER_STATE_FILE.open() as f:
+                    state = json.load(f)
+                self._cash = float(state["cash"])
+                self._side = state.get("side", "flat")
+                self._qty = float(state.get("qty", 0.0))
+                self._entry_price = float(state.get("entry_price", 0.0))
+                self._next_id = int(state.get("next_id", 1))
+                self._open_orders = state.get("open_orders", {})
+                self._trial_started_at = state.get("trial_started_at") or datetime.now(timezone.utc).isoformat()
+                if "trial_started_at" not in state:
+                    self._save_state()
+                log.info("Restored paper account state (%s, cash=%.2f)", self._side, self._cash)
+                return
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as e:
+            log.warning("Could not restore paper account state: %s", e)
+
+        # First run after this upgrade: continue from the most recent paper
+        # journal balance instead of silently resetting the account to $1,000.
+        latest: dict | None = None
+        for path in JOURNAL_DIR.glob("paper_*.jsonl"):
+            try:
+                for line in path.read_text().splitlines():
+                    event = json.loads(line)
+                    if event.get("ts") and (latest is None or event["ts"] > latest.get("ts", "")):
+                        latest = event
+            except (OSError, json.JSONDecodeError):
+                continue
+        if latest and "cash" in latest:
+            self._cash = float(latest["cash"])
+            # The final journal event is authoritative for position state.
+            if latest.get("event") == "open":
+                self._side = str(latest.get("side", "flat"))
+                self._qty = float(latest.get("qty", 0.0))
+                self._entry_price = float(latest.get("price", 0.0))
+            log.info("Bootstrapped paper account from journal (cash=%.2f)", self._cash)
+        self._trial_started_at = datetime.now(timezone.utc).isoformat()
+        self._save_state()
+
+    def _save_state(self) -> None:
+        state = {
+            "version": 1,
+            "cash": self._cash,
+            "side": self._side,
+            "qty": self._qty,
+            "entry_price": self._entry_price,
+            "next_id": self._next_id,
+            "open_orders": self._open_orders,
+            "trial_started_at": self._trial_started_at,
+        }
+        tmp = PAPER_STATE_FILE.with_suffix(".tmp")
+        try:
+            with tmp.open("w") as f:
+                json.dump(state, f)
+            tmp.replace(PAPER_STATE_FILE)
+        except OSError as e:
+            log.warning("Could not save paper account state: %s", e)
 
     # ---- internals ----
     def _gen_id(self) -> str:
@@ -105,6 +169,7 @@ class PaperBroker:
                 self._open_position("buy" if side == "buy" else "sell", remainder, price, fee_bps=fee_bps)
         else:
             self._open_position(side, qty, price, fee_bps=fee_bps)
+        self._save_state()
 
     def _open_position(self, side: str, qty: float, price: float, fee_bps: float) -> None:
         fee = qty * price * fee_bps / 10_000.0
@@ -127,15 +192,14 @@ class PaperBroker:
             side, price, qty = o["side"], o["price"], o["qty"]
             filled = False
             if side == "buy" and ask <= price:
-                self._apply_fill(side, qty, price, MAKER_FEE_BPS, reduce_only=False)
                 filled = True
             elif side == "sell" and bid >= price:
-                self._apply_fill(side, qty, price, MAKER_FEE_BPS, reduce_only=False)
                 filled = True
             if filled:
                 o["status"] = "closed"
                 o["filled"] = qty
                 o["average"] = price
+                self._apply_fill(side, qty, price, MAKER_FEE_BPS, reduce_only=False)
 
     # ---- public interface (mirrors Broker) ----
     def equity_usdt(self) -> float:
@@ -150,10 +214,9 @@ class PaperBroker:
         return self._cash + upnl
 
     def ohlcv(self, timeframe: str = "1m", limit: int = 500) -> pd.DataFrame:
-        raw = self.ex.fetch_ohlcv(self.symbol, timeframe=timeframe, limit=limit)
-        df = pd.DataFrame(raw, columns=["ts", "open", "high", "low", "close", "volume"])
-        df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
-        return df.set_index("ts")
+        if timeframe not in self._ohlcv_caches:
+            self._ohlcv_caches[timeframe] = OhlcvCache(self.ex, self.symbol, timeframe)
+        return self._ohlcv_caches[timeframe].get(limit)
 
     def best_bid_ask(self) -> tuple[float, float]:
         return self._refresh_book()
@@ -175,6 +238,7 @@ class PaperBroker:
         price = ask if side == "buy" else bid
         self._apply_fill(side, qty, price, TAKER_FEE_BPS, reduce_only)
         oid = self._gen_id()
+        self._save_state()
         return {"id": oid, "status": "closed", "filled": qty, "average": price, "price": price}
 
     def post_only_limit(self, side: str, qty: float, price: float) -> dict | None:
@@ -189,6 +253,7 @@ class PaperBroker:
         order = {"id": oid, "status": "open", "side": side, "qty": qty, "price": price,
                  "filled": 0.0, "average": None}
         self._open_orders[oid] = order
+        self._save_state()
         log.info("[paper] LMT %s qty=%.4f @ %.4f post-only id=%s", side, qty, price, oid)
         return order
 
@@ -200,12 +265,14 @@ class PaperBroker:
         o = self._open_orders.get(order_id)
         if o and o["status"] == "open":
             o["status"] = "canceled"
+            self._save_state()
             log.info("[paper] cancelled order %s", order_id)
 
     def cancel_all(self) -> None:
         for o in self._open_orders.values():
             if o["status"] == "open":
                 o["status"] = "canceled"
+        self._save_state()
 
     def close_position(self) -> None:
         if self._side == "flat" or self._qty == 0:

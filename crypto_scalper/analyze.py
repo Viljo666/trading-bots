@@ -9,6 +9,7 @@ Reads journal/paper_*.jsonl, pairs open/close events into trades, prints:
 Usage:
   python analyze.py            # all-time
   python analyze.py --days 7   # last 7 days only
+  python analyze.py --current-trial  # only the post-fix paper trial
 """
 from __future__ import annotations
 
@@ -21,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
-from config import JOURNAL_DIR, RISK
+from config import JOURNAL_DIR, PAPER_STATE_FILE, RISK
 
 
 # Validated SOL walk-forward baseline (90d, 3 windows after ADX<30 filter).
@@ -52,7 +53,12 @@ class Trade:
 
     @property
     def is_win(self) -> bool:
-        return self.pnl > 0
+        return self.net_pnl > 0
+
+    @property
+    def net_pnl(self) -> float:
+        """Price P&L after both recorded exchange-simulation fees."""
+        return self.pnl - self.entry_fee - self.exit_fee
 
 
 def load_events(journal_dir: Path) -> list[dict]:
@@ -70,6 +76,16 @@ def load_events(journal_dir: Path) -> list[dict]:
         e["ts"] = datetime.fromisoformat(e["ts"])
     events.sort(key=lambda e: e["ts"])
     return events
+
+
+def current_trial_start() -> datetime:
+    try:
+        value = json.loads(PAPER_STATE_FILE.read_text()).get("trial_started_at")
+        if not value:
+            raise ValueError("missing trial_started_at")
+        return datetime.fromisoformat(value)
+    except (OSError, ValueError, json.JSONDecodeError) as e:
+        raise RuntimeError(f"Current paper-trial start is unavailable: {e}") from e
 
 
 def pair_trades(events: Iterable[dict]) -> tuple[list[Trade], dict | None]:
@@ -102,9 +118,9 @@ def stats_block(trades: list[Trade], starting_equity: float) -> str:
     n = len(trades)
     wins = [t for t in trades if t.is_win]
     losses = [t for t in trades if not t.is_win]
-    gross_win = sum(t.pnl for t in wins)
-    gross_loss = -sum(t.pnl for t in losses)
-    pnl = sum(t.pnl for t in trades)
+    gross_win = sum(t.net_pnl for t in wins)
+    gross_loss = -sum(t.net_pnl for t in losses)
+    pnl = sum(t.net_pnl for t in trades)
     win_rate = len(wins) / n
     expectancy = pnl / n
     profit_factor = (gross_win / gross_loss) if gross_loss > 0 else float("inf")
@@ -114,7 +130,7 @@ def stats_block(trades: list[Trade], starting_equity: float) -> str:
     peak = starting_equity
     max_dd = 0.0
     for t in trades:
-        equity += t.pnl
+        equity += t.net_pnl
         peak = max(peak, equity)
         dd = (equity - peak) / peak
         max_dd = min(max_dd, dd)
@@ -151,7 +167,7 @@ def baseline_compare(trades: list[Trade], starting_equity: float) -> str:
     n = len(trades)
     wins = sum(1 for t in trades if t.is_win)
     win_rate = wins / n
-    pnl = sum(t.pnl for t in trades)
+    pnl = sum(t.net_pnl for t in trades)
     exp_pct = (pnl / n) / starting_equity
 
     span_days = (trades[-1].close_ts - trades[0].open_ts).total_seconds() / 86400.0
@@ -189,8 +205,8 @@ def time_buckets(trades: list[Trade]) -> str:
     by_hour: dict[int, list[float]] = defaultdict(list)
     dow_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     for t in trades:
-        by_dow[dow_names[t.open_ts.weekday()]].append(t.pnl)
-        by_hour[t.open_ts.hour].append(t.pnl)
+        by_dow[dow_names[t.open_ts.weekday()]].append(t.net_pnl)
+        by_hour[t.open_ts.hour].append(t.net_pnl)
 
     out = ["By day of week:", f"  {'day':<5}{'n':>4}{'win%':>8}{'pnl':>10}"]
     for dow in dow_names:
@@ -213,11 +229,23 @@ def time_buckets(trades: list[Trade]) -> str:
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--days", type=int, default=None, help="Limit to last N days (default: all)")
+    p.add_argument("--since", help="Limit to events at/after ISO UTC timestamp")
+    p.add_argument("--current-trial", action="store_true", help="Use the post-fix paper-trial start")
     p.add_argument("--starting-equity", type=float, default=RISK.account_size_usdt)
     p.add_argument("--no-time", action="store_true", help="Skip day-of-week / hour buckets")
     args = p.parse_args()
 
     events = load_events(JOURNAL_DIR)
+    if args.since and args.current_trial:
+        p.error("use either --since or --current-trial, not both")
+    if args.since:
+        cutoff = datetime.fromisoformat(args.since)
+        if cutoff.tzinfo is None:
+            cutoff = cutoff.replace(tzinfo=timezone.utc)
+        events = [e for e in events if e["ts"] >= cutoff]
+    elif args.current_trial:
+        cutoff = current_trial_start()
+        events = [e for e in events if e["ts"] >= cutoff]
     if args.days is not None:
         cutoff = datetime.now(timezone.utc).timestamp() - args.days * 86400
         events = [e for e in events if e["ts"].timestamp() >= cutoff]

@@ -11,6 +11,7 @@ Exits use market orders (taker) — speed > fee on the way out.
 """
 from __future__ import annotations
 
+import json
 import logging
 import signal
 import sys
@@ -18,7 +19,8 @@ import time
 from datetime import datetime, timezone
 
 import notify
-from config import EXCHANGE, RISK, SESSION, STRATEGY, validate
+import pandas as pd
+from config import EXCHANGE, RISK, RUNNER_STATE_FILE, SESSION, STRATEGY, validate
 from indicators import add_indicators
 from risk import daily_loss_breached, size_trade
 from strategy import latest_signal, should_exit
@@ -39,6 +41,40 @@ def make_broker():
     return Broker()
 
 
+def history_bars() -> int:
+    """Bars to fetch so live indicators match the backtest's long history.
+
+    Bands are a rolling std of (close - VWAP) over vwap_window bars, and each of
+    those VWAPs itself spans vwap_window bars, so full-width bands need ~2x the
+    window. The margin also covers the forming bar that completed_ohlcv drops.
+    """
+    return 2 * STRATEGY.vwap_window + 50
+
+
+def completed_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
+    """Return only final candles, never the exchange's still-forming last bar."""
+    if df.empty:
+        return df.copy()
+    clean = df[~df.index.duplicated(keep="last")].sort_index()
+    # CCXT returns the in-progress candle as the final row. Acting on it makes
+    # a five-second poll behave differently from the candle-close backtest.
+    return clean.iloc[:-1].copy()
+
+
+def _timestamp(value) -> pd.Timestamp | None:
+    if not value:
+        return None
+    try:
+        ts = pd.Timestamp(value)
+        if pd.isna(ts):
+            return None
+        if ts.tzinfo is None:
+            return ts.tz_localize("UTC")
+        return ts.tz_convert("UTC")
+    except (TypeError, ValueError):
+        return None
+
+
 class Runner:
     STATE_IDLE = "IDLE"
     STATE_PENDING = "PENDING"
@@ -54,11 +90,70 @@ class Runner:
         self.entry_price: float | None = None
         self.entry_qty: float = 0.0
         self.entry_bar_ts = None
+        self.pending_signal_bar_ts = None
         self.intended_side: str | None = None
         # Cooldown: after exiting, don't re-enter same direction for cooldown_bars.
         self.last_exit_side: str | None = None
         self.cooldown_until: float = 0.0
+        self.last_entry_bar_ts = None
+        self.last_exit_bar_ts = None
         self.stopped = False
+        self._load_state()
+
+    def _load_state(self) -> None:
+        """Restore only durable decision state; broker remains the source of truth for fills."""
+        if not RUNNER_STATE_FILE.exists():
+            return
+        try:
+            with RUNNER_STATE_FILE.open() as f:
+                saved = json.load(f)
+            state = saved.get("state", self.STATE_IDLE)
+            self.state = state if state in {
+                self.STATE_IDLE, self.STATE_PENDING, self.STATE_IN_POSITION,
+            } else self.STATE_IDLE
+            self.pending_order_id = saved.get("pending_order_id") or None
+            self.pending_since = float(saved.get("pending_since") or 0.0)
+            self.entry_price = saved.get("entry_price")
+            self.entry_qty = float(saved.get("entry_qty") or 0.0)
+            self.entry_bar_ts = _timestamp(saved.get("entry_bar_ts"))
+            self.pending_signal_bar_ts = _timestamp(saved.get("pending_signal_bar_ts"))
+            self.intended_side = saved.get("intended_side") or None
+            self.last_exit_side = saved.get("last_exit_side") or None
+            self.cooldown_until = float(saved.get("cooldown_until") or 0.0)
+            self.last_entry_bar_ts = _timestamp(saved.get("last_entry_bar_ts"))
+            self.last_exit_bar_ts = _timestamp(saved.get("last_exit_bar_ts"))
+            if self.state == self.STATE_PENDING and not self.pending_order_id:
+                self.state = self.STATE_IDLE
+            log.info("Restored runner state: %s", self.state)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as e:
+            log.warning("Ignoring unreadable runner state: %s", e)
+
+    def _save_state(self) -> None:
+        def iso(value):
+            return value.isoformat() if value is not None else None
+
+        state = {
+            "version": 1,
+            "state": self.state,
+            "pending_order_id": self.pending_order_id,
+            "pending_since": self.pending_since,
+            "entry_price": self.entry_price,
+            "entry_qty": self.entry_qty,
+            "entry_bar_ts": iso(self.entry_bar_ts),
+            "pending_signal_bar_ts": iso(self.pending_signal_bar_ts),
+            "intended_side": self.intended_side,
+            "last_exit_side": self.last_exit_side,
+            "cooldown_until": self.cooldown_until,
+            "last_entry_bar_ts": iso(self.last_entry_bar_ts),
+            "last_exit_bar_ts": iso(self.last_exit_bar_ts),
+        }
+        tmp = RUNNER_STATE_FILE.with_suffix(".tmp")
+        try:
+            with tmp.open("w") as f:
+                json.dump(state, f)
+            tmp.replace(RUNNER_STATE_FILE)
+        except OSError as e:
+            log.warning("Could not save runner state: %s", e)
 
     # ---- Helpers ----
     def _maybe_reset_daily_pnl(self) -> None:
@@ -85,8 +180,19 @@ class Runner:
 
     # ---- IDLE: look for signal, place maker entry ----
     def _try_place_maker_entry(self) -> None:
-        df = self.broker.ohlcv(EXCHANGE.timeframe, limit=max(500, STRATEGY.vwap_window + 50))
+        raw_df = self.broker.ohlcv(EXCHANGE.timeframe, limit=history_bars())
+        df = completed_ohlcv(raw_df)
+        if df.empty:
+            return
+        bar_ts = df.index[-1]
+        if self.last_entry_bar_ts is not None and bar_ts <= self.last_entry_bar_ts:
+            return
+
         sig = latest_signal(df)
+        # Each completed bar gets exactly one entry decision, even if the loop
+        # runs twelve times during the following minute or the process restarts.
+        self.last_entry_bar_ts = bar_ts
+        self._save_state()
         if sig.side == "none":
             return
 
@@ -123,6 +229,8 @@ class Runner:
         self.intended_side = sig.side
         self.entry_price = limit_price
         self.entry_qty = sized.qty
+        self.pending_signal_bar_ts = bar_ts
+        self._save_state()
         log.info(
             "PENDING %s qty=%.4f px=%.4f stop=%.4f target=%.4f reason=%s",
             sig.side, sized.qty, limit_price, sig.stop, sig.target, sig.reason,
@@ -145,11 +253,13 @@ class Runner:
         if status in ("closed", "filled") or filled > 0:
             self.entry_price = float(order.get("average") or order.get("price") or self.entry_price or 0.0)
             self.entry_qty = filled or self.entry_qty
-            self.entry_bar_ts = datetime.now(timezone.utc)
+            self.entry_bar_ts = self.pending_signal_bar_ts
             self.state = self.STATE_IN_POSITION
             log.info("FILLED %s @ %.4f qty=%.4f", self.intended_side, self.entry_price, filled)
             notify.entry_filled(EXCHANGE.symbol, self.intended_side or "", self.entry_qty, self.entry_price)
             self.pending_order_id = None
+            self.pending_signal_bar_ts = None
+            self._save_state()
             return
 
         if status in ("canceled", "cancelled", "rejected", "expired"):
@@ -166,9 +276,13 @@ class Runner:
         log.info("→ IDLE (%s)", reason)
         self.state = self.STATE_IDLE
         self.pending_order_id = None
+        self.pending_since = 0.0
+        self.pending_signal_bar_ts = None
         self.intended_side = None
         self.entry_price = None
+        self.entry_qty = 0.0
         self.entry_bar_ts = None
+        self._save_state()
 
     # ---- IN_POSITION: check exit ----
     def _try_exit(self) -> None:
@@ -177,7 +291,13 @@ class Runner:
             self._reset_to_idle("position vanished")
             return
 
-        df = self.broker.ohlcv(EXCHANGE.timeframe, limit=max(500, STRATEGY.vwap_window + 50))
+        raw_df = self.broker.ohlcv(EXCHANGE.timeframe, limit=history_bars())
+        df = completed_ohlcv(raw_df)
+        if df.empty:
+            return
+        bar_ts = df.index[-1]
+        if self.last_exit_bar_ts is not None and bar_ts <= self.last_exit_bar_ts:
+            return
         enriched = add_indicators(
             df, STRATEGY.vwap_window, STRATEGY.band_sigma, STRATEGY.rsi_period, STRATEGY.adx_period
         )
@@ -205,9 +325,13 @@ class Runner:
             # Arm cooldown so we don't immediately re-enter same direction.
             self.last_exit_side = side_at_exit
             self.cooldown_until = time.time() + STRATEGY.cooldown_bars * self._timeframe_seconds()
+            self.last_exit_bar_ts = bar_ts
             log.info("Cooldown armed: no %s entries for %d seconds",
                      side_at_exit, STRATEGY.cooldown_bars * self._timeframe_seconds())
             self._reset_to_idle(f"closed: {why}")
+        else:
+            self.last_exit_bar_ts = bar_ts
+            self._save_state()
 
     # ---- Main loop ----
     def run(self) -> None:
@@ -259,6 +383,7 @@ class Runner:
             if self.pending_order_id:
                 self.broker.cancel_order(self.pending_order_id)
             self.broker.close_position()
+            self._reset_to_idle("shutdown")
             notify.shutdown(self.broker.equity_usdt())
         except Exception as e:
             log.warning("close on shutdown failed: %s", e)

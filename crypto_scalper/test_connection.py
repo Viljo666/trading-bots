@@ -7,7 +7,7 @@ import logging
 import sys
 
 from config import EXCHANGE, STRATEGY, validate
-from live import make_broker
+from live import completed_ohlcv, history_bars, make_broker
 from strategy import latest_signal
 
 log = logging.getLogger("test_conn")
@@ -26,9 +26,9 @@ def main() -> None:
     bid, ask = b.best_bid_ask()
     log.info("Top of book: bid=%.4f ask=%.4f spread=%.2f bps", bid, ask, (ask - bid) / ((ask + bid) / 2) * 10_000)
 
-    df = b.ohlcv(EXCHANGE.timeframe, limit=max(500, STRATEGY.vwap_window + 50))
-    log.info("OHLCV: %d bars from %s to %s last_close=%.4f",
-             len(df), df.index[0], df.index[-1], float(df["close"].iloc[-1]))
+    df = completed_ohlcv(b.ohlcv(EXCHANGE.timeframe, limit=history_bars()))
+    log.info("OHLCV: %d closed bars (need %d) from %s to %s last_close=%.4f",
+             len(df), history_bars() - 1, df.index[0], df.index[-1], float(df["close"].iloc[-1]))
 
     sig = latest_signal(df)
     log.info("Latest signal: side=%s reason=%s", sig.side, sig.reason)
