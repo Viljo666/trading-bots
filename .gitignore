@@ -40,3 +40,6 @@ stock_screener/
 .idea/
 .vscode/
 .claude/
+
+# --- drdoom community bot state ---
+*.db
