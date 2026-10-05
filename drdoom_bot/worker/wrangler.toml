@@ -12,11 +12,13 @@ enabled = true
 CHAT_ID = "-1003955294607"   # DRDOOM Community Chat (@drdoommemechat)
 MIN_BUY_SOL = "0.1"
 BUY_ALERTS = "1"
+# api.mainnet-beta.solana.com answers Cloudflare with HTTP 403; PublicNode is keyless.
+SOLANA_RPC_URL = "https://solana-rpc.publicnode.com"
 
-# database_id is filled in after `wrangler d1 create drdoom-bot`.
+# Created with: wrangler d1 create drdoom-bot
 [[d1_databases]]
 binding = "DB"
 database_name = "drdoom-bot"
-database_id = "REPLACE_AFTER_D1_CREATE"
+database_id = "7f2bac7d-e168-4646-9d1a-4696ebbc8107"
 
-# Secrets (wrangler secret put ...): BOT_TOKEN, WEBHOOK_SECRET, optionally SOLANA_RPC_URL
+# Secrets (wrangler secret put ...): BOT_TOKEN, WEBHOOK_SECRET
