@@ -12,7 +12,12 @@
 // MEME_HOURS. It fills from the memes/ folder of the public GitHub repo MEME_REPO (that
 // repo's workflow publishes the file list as index.json) and from photos admins DM the bot.
 //
-// Secrets: BOT_TOKEN, WEBHOOK_SECRET. Vars: see wrangler.toml.
+// Each meme is also posted to X when the four X_* secrets are set (OAuth 1.0a user keys
+// with Read and write permission). X bills per post, and 13x more for a post containing
+// a link, so the X text never includes one.
+//
+// Secrets: BOT_TOKEN, WEBHOOK_SECRET, optionally X_API_KEY, X_API_SECRET, X_ACCESS_TOKEN,
+// X_ACCESS_SECRET. Vars: see wrangler.toml.
 
 const RANKS = [[0, "Bystander"], [10, "Henchman"], [50, "Minion"], [150, "Enforcer"],
                [400, "Lieutenant"], [1000, "Mastermind"]];
@@ -24,6 +29,12 @@ const ADMIN_CACHE_TTL = 300;
 const SIG_PAGE = 40;
 const SUBREQUEST_BUDGET = 45;   // of the free plan's 50
 const BUY_SEND_RESERVE = 12;    // requests kept back for posting alerts and housekeeping
+
+// Rotated so consecutive X posts never have identical text, which X rejects as duplicates.
+const X_LINES = ["Every timeline needs a villain.", "Doom has entered the chat.", "Villain hours.",
+                 "No master plan. Just memes.", "A little doom. A lot of memes.", "World domination, pending.",
+                 "The lair is open.", "Evil never sleeps. It naps."];
+const X_API = "https://api.x.com/2";
 
 const SOL_ADDRESS = /\b[1-9A-HJ-NP-Za-km-z]{32,44}\b/g;
 const EVM_ADDRESS = /\b0x[a-fA-F0-9]{40}\b/g;
@@ -47,6 +58,25 @@ function short(x, prefix = "") {
     if (Math.abs(x) >= div) return `${prefix}${(x / div).toFixed(2)}${suffix}`;
   }
   return `${prefix}${x.toFixed(prefix ? 2 : 0)}`;
+}
+
+// RFC 3986 percent-encoding, which OAuth 1.0a requires (encodeURIComponent leaves !'()* alone).
+const pct = (s) => encodeURIComponent(s).replace(/[!'()*]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase());
+
+// OAuth 1.0a Authorization header. `params` are query or form-encoded body parameters, which
+// are part of the signature; JSON and multipart bodies are not, so callers pass none for those.
+export async function oauthHeader({ method, url, consumerKey, consumerSecret, token, tokenSecret, nonce, timestamp, params = {} }) {
+  const oauth = { oauth_consumer_key: consumerKey, oauth_nonce: nonce, oauth_signature_method: "HMAC-SHA1",
+                  oauth_timestamp: String(timestamp), oauth_token: token, oauth_version: "1.0" };
+  const signed = Object.entries({ ...params, ...oauth }).map(([k, v]) => [pct(k), pct(v)]).sort()
+    .map(([k, v]) => `${k}=${v}`).join("&");
+  const base = [method.toUpperCase(), pct(url), pct(signed)].join("&");
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey("raw", enc.encode(`${pct(consumerSecret)}&${pct(tokenSecret)}`),
+                                            { name: "HMAC", hash: "SHA-1" }, false, ["sign"]);
+  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, enc.encode(base)));
+  oauth.oauth_signature = btoa(String.fromCharCode(...mac));
+  return "OAuth " + Object.entries(oauth).sort().map(([k, v]) => `${pct(k)}="${pct(v)}"`).join(", ");
 }
 
 function hostOf(url) {
@@ -91,6 +121,10 @@ export class Bot {
       gateMinutes: Number(env.GATE_TIMEOUT_MIN || 5),
       memeHours: (env.MEME_HOURS ?? "").split(",").map((h) => h.trim()).filter(Boolean).map(Number),   // UTC
       memeChat: env.MEME_CHAT_ID ? Number(env.MEME_CHAT_ID) : Number(env.CHAT_ID),
+      x: env.X_API_KEY && env.X_API_SECRET && env.X_ACCESS_TOKEN && env.X_ACCESS_SECRET
+        ? { consumerKey: env.X_API_KEY, consumerSecret: env.X_API_SECRET, token: env.X_ACCESS_TOKEN,
+            tokenSecret: env.X_ACCESS_SECRET }
+        : null,
       memeRepo: env.MEME_REPO ? `https://raw.githubusercontent.com/${env.MEME_REPO}/main/` : null,
       allowed: [hostOf(site), ...(env.ALLOWED_DOMAINS || "x.com,twitter.com").split(",")
         .map((d) => d.trim().toLowerCase()).filter(Boolean)],
@@ -621,12 +655,62 @@ export class Bot {
       // A file Telegram rejects (too big, not an image) is marked failed so it can't block the queue.
       await this.run("UPDATE meme SET posted_at=? WHERE id=?", sent ? this.now() : -1, meme.id);
       if (!sent) continue;
+      await this.crossPostToX(meme);
       if (meme.added_by && (await this.memesWaiting()) === 0) {
         await this.send("That was the last meme in the queue. Send me more photos to refill it.", { chatId: meme.added_by });
       }
       return true;
     }
     return false;
+  }
+
+  // ---------- X ----------
+
+  async xCall(path, init) {
+    const url = X_API + path;
+    const authorization = await oauthHeader({ method: "POST", url, ...this.cfg.x, timestamp: Math.floor(this.now()),
+                                              nonce: crypto.randomUUID().replace(/-/g, "") });
+    const r = await this.http(url, { method: "POST", ...init, headers: { ...init.headers, authorization } });
+    const text = await r.text();
+    if (!r.ok) throw new Error(`X ${path} HTTP ${r.status}: ${text.slice(0, 200)}`);
+    return JSON.parse(text).data;
+  }
+
+  // The image itself: straight from GitHub, or from Telegram's file store for DM uploads.
+  async memeBytes(meme) {
+    let url = meme.file_id;
+    if (!url.startsWith("https://")) {
+      const file = await this.tg("getFile", { file_id: meme.file_id });
+      if (!file) throw new Error("Telegram getFile failed");
+      url = `https://api.telegram.org/file/bot${this.cfg.token}/${file.file_path}`;
+    }
+    const r = await this.http(url);
+    if (!r.ok) throw new Error(`image download HTTP ${r.status}`);
+    return r.blob();
+  }
+
+  async postToX(meme) {
+    const form = new FormData();
+    form.append("media", await this.memeBytes(meme), "meme");
+    form.append("media_category", "tweet_image");
+    const media = await this.xCall("/media/upload", { body: form });
+    const line = (meme.caption || X_LINES[meme.id % X_LINES.length]).replace(BARE_URL, "").trim();
+    return this.xCall("/tweets", { headers: { "content-type": "application/json" },
+                                   body: JSON.stringify({ text: `${line}\n\n$${this.cfg.ticker}`.trim(),
+                                                          media: { media_ids: [media.id] } }) });
+  }
+
+  // X is best-effort: a failure there never undoes or delays the Telegram post.
+  async crossPostToX(meme) {
+    if (!this.cfg.x) return;
+    try {
+      await this.postToX(meme);
+      await this.kvSet("x_error", null);
+    } catch (e) {
+      console.warn(`X post failed: ${e.message}`);
+      await this.kvSet("x_error", `${new Date(this.now() * 1000).toISOString().slice(0, 16)}Z ${e.message}`);
+      if (meme.added_by) await this.send("That meme went to Telegram but not to X. /memes shows the error.", { chatId: meme.added_by });
+    }
   }
 
   async cmdMeme(msg, arg, chatId = this.cfg.chatId) {
@@ -638,7 +722,9 @@ export class Bot {
   async cmdMemes(msg, arg, chatId = this.cfg.chatId) {
     await this.syncMemes();
     const hours = this.cfg.memeHours.map((h) => `${String(h).padStart(2, "0")}:00`).join(" and ") || "never";
-    await this.send(`${await this.memesWaiting()} memes in the queue. Posting daily at ${hours} UTC.`,
+    const xError = this.cfg.x ? await this.kv("x_error") : null;
+    const x = !this.cfg.x ? "off" : xError ? `on, last post failed:\n<code>${esc(xError)}</code>` : "on";
+    await this.send(`${await this.memesWaiting()} memes in the queue. Posting daily at ${hours} UTC.\nX posting: ${x}`,
                     { chatId, ttl: chatId === this.cfg.chatId ? NOTICE_TTL : undefined });
   }
 

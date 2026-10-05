@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { beforeEach, test } from "node:test";
 
-import worker, { Bot, MUTED, OPEN, parseBuy, voteMarkup } from "./src/worker.js";
+import worker, { Bot, MUTED, OPEN, oauthHeader, parseBuy, voteMarkup } from "./src/worker.js";
 
 const CHAT = -100123;
 const ADMIN = { id: 1, first_name: "Boss" };
@@ -24,15 +24,22 @@ function d1() {
   } }) };
 }
 
-let calls, clock, env, index, mid, nextId, rpc;
+let calls, clock, env, index, mid, nextId, rpc, xCalls, xFail;
 
 function fakeFetch(url, init) {
   const json = (body, status = 200) => new Response(JSON.stringify(body), { status });
+  if (url.startsWith("https://api.x.com/")) {
+    xCalls.push({ url, auth: init.headers.authorization, body: init.body });
+    if (xFail) return json({ title: "CreditsDepleted" }, 402);
+    return json({ data: { id: url.endsWith("/media/upload") ? "777" : "888" } });
+  }
+  if (url.includes("api.telegram.org/file/") || url.includes("/main/memes/")) return new Response("IMG:" + url.split("/").pop());
   if (url.includes("api.telegram.org")) {
     const method = url.split("/").pop();
     const params = typeof init.body === "string" ? JSON.parse(init.body) : Object.fromEntries(init.body);
     calls.push([method, params]);
     if (method === "getChatAdministrators") return json({ ok: true, result: [{ user: ADMIN }] });
+    if (method === "getFile") return json({ ok: true, result: { file_path: "photos/file_9.jpg" } });
     if (method === "getChat") return json({ ok: true, result: { permissions: { can_send_messages: true, can_send_photos: true } } });
     if (method === "sendPhoto" && String(params.photo).includes("broken")) return json({ ok: false, description: "wrong file" });
     if (method === "sendMessage" || method === "sendPhoto") return json({ ok: true, result: { message_id: ++nextId } });
@@ -61,7 +68,7 @@ const press = (user, data) =>
   bot().handle({ callback_query: { id: "cq", from: user, data, message: { chat: { id: CHAT } } } });
 
 beforeEach(() => {
-  calls = []; clock = 1_000_000; index = null; mid = 0; nextId = 1000; rpc = null;
+  calls = []; clock = 1_000_000; index = null; mid = 0; nextId = 1000; rpc = null; xCalls = []; xFail = false;
   env = { DB: d1(), BOT_TOKEN: "x", CHAT_ID: String(CHAT), BUY_ALERTS: "0", WEBHOOK_SECRET: "s3cret" };
 });
 
@@ -281,7 +288,7 @@ test("/meme posts the next one now (admins only); /memes reports the queue", asy
   await say(ALICE, "/meme");
   assert.equal(of("sendPhoto").length, 0);
   await say(ADMIN, "/memes");
-  assert.equal(texts().at(-1), "1 memes in the queue. Posting daily at 10:00 and 18:00 UTC.");
+  assert.equal(texts().at(-1), "1 memes in the queue. Posting daily at 10:00 and 18:00 UTC.\nX posting: off");
   await say(ADMIN, "/meme");
   assert.equal(of("sendPhoto").length, 1);
   await say(ADMIN, "/meme");
@@ -315,4 +322,63 @@ test("a file Telegram rejects is skipped instead of blocking the queue", async (
   assert.equal(await bot().memesWaiting(), 0);
   await say(ADMIN, "/meme");
   assert.equal(of("sendPhoto").length, 2);
+});
+
+// --- X ---
+
+test("OAuth 1.0a signature matches X's documented example", async () => {
+  const header = await oauthHeader({
+    method: "post", url: "https://api.twitter.com/1.1/statuses/update.json",
+    consumerKey: "xvz1evFS4wEEPTGEFPHBog", consumerSecret: "kAcSOqF21Fu85e7zjz7ZN2U4ZRhfV3WpwPAoE3Z7kBw",
+    token: "370773112-GmHxMAgYyLbNEtIKZeRNFsMKPR9EyMZeS9weJAEb", tokenSecret: "LswwdoUaIvS8ltyTt5jkRh4J50vUPVVHtR2YPi5kE",
+    nonce: "kYjzVBB8Y0ZFabxSWbWovY3uYSQ2pTgmZeNu2VS4cg", timestamp: 1318622958,
+    params: { include_entities: "true", status: "Hello Ladies + Gentlemen, a signed OAuth request!" } });
+  assert.match(header, /oauth_signature="hCtSmYh%2BiHYCEqBWrE7C7hYmtUk%3D"/);
+  assert.ok(header.startsWith('OAuth oauth_consumer_key="xvz1evFS4wEEPTGEFPHBog", oauth_nonce='));
+});
+
+const X_KEYS = { X_API_KEY: "ck", X_API_SECRET: "cs", X_ACCESS_TOKEN: "at", X_ACCESS_SECRET: "as" };
+
+test("with X keys, each meme is uploaded and posted to X without a link", async () => {
+  Object.assign(env, X_KEYS, { MEME_REPO: "Viljo666/drdoom-memes" });
+  index = ["memes/one.png"];
+  await dm(ADMIN, { photo: pic("a"), caption: "Mondays. https://drdoom.pages.dev/" });
+  await say(ADMIN, "/meme");
+  await say(ADMIN, "/meme");
+  assert.equal(of("sendPhoto").length, 2);
+  assert.deepEqual(xCalls.map((c) => c.url.replace("https://api.x.com/2", "")), ["/media/upload", "/tweets", "/media/upload", "/tweets"]);
+  assert.match(xCalls[0].auth, /^OAuth oauth_consumer_key="ck", oauth_nonce="[0-9a-f]{32}", oauth_signature="[^"]+", oauth_signature_method="HMAC-SHA1", oauth_timestamp="\d+", oauth_token="at", oauth_version="1.0"$/);
+  assert.equal(xCalls[0].body.get("media_category"), "tweet_image");
+  assert.equal(await xCalls[0].body.get("media").text(), "IMG:file_9.jpg");       // DM upload: via Telegram getFile
+  assert.equal(await xCalls[2].body.get("media").text(), "IMG:one.png");          // GitHub file: fetched directly
+  assert.deepEqual(JSON.parse(xCalls[1].body), { text: "Mondays.\n\n$DRDOOM", media: { media_ids: ["777"] } });
+  const second = JSON.parse(xCalls[3].body).text;
+  assert.match(second, /\n\n\$DRDOOM$/);
+  assert.ok(!/https?:|\.dev|\.com/.test(second));
+  await say(ADMIN, "/memes");
+  assert.match(texts().at(-1), /X posting: on$/);
+});
+
+test("an X failure never blocks Telegram, and /memes shows the error", async () => {
+  Object.assign(env, X_KEYS);
+  xFail = true;
+  await dm(ADMIN, { photo: pic("a") });
+  await dm(ADMIN, { photo: pic("b") });
+  await say(ADMIN, "/meme");
+  assert.equal(of("sendPhoto").length, 1);
+  assert.equal(await bot().memesWaiting(), 1);
+  assert.match(texts().at(-1), /went to Telegram but not to X/);
+  await say(ADMIN, "/memes");
+  assert.match(texts().at(-1), /X posting: on, last post failed:\n<code>.*HTTP 402.*CreditsDepleted/s);
+  xFail = false;
+  await say(ADMIN, "/meme");
+  await say(ADMIN, "/memes");
+  assert.match(texts().at(-1), /X posting: on$/);
+});
+
+test("without X keys nothing is sent to X", async () => {
+  await dm(ADMIN, { photo: pic("a") });
+  await say(ADMIN, "/meme");
+  assert.equal(of("sendPhoto").length, 1);
+  assert.equal(xCalls.length, 0);
 });
