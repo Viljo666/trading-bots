@@ -1,16 +1,6 @@
 name = "drdoom-bot"
-main = "src/index.js"
+main = "src/worker.js"
 compatibility_date = "2026-09-01"
-compatibility_flags = ["nodejs_compat"]
-
-# Character art for the meme generator, imported as bytes.
-[[rules]]
-type = "Data"
-globs = ["**/*.jpg"]
-fallthrough = true
-
-[ai]
-binding = "AI"
 
 [triggers]
 crons = ["* * * * *"]
@@ -22,7 +12,7 @@ enabled = true
 CHAT_ID = "-1003955294607"   # DRDOOM Community Chat (@drdoommemechat)
 MIN_BUY_SOL = "0.1"
 BUY_ALERTS = "1"
-MEME_HOURS = "10,18"           # UTC hours for an automatic AI meme; "" turns them off
+MEME_HOURS = "10,18"           # UTC hours to post one meme from the queue; "" turns it off
 # api.mainnet-beta.solana.com answers Cloudflare with HTTP 403; PublicNode is keyless.
 SOLANA_RPC_URL = "https://solana-rpc.publicnode.com"
 

@@ -241,69 +241,49 @@ test("webhook rejects requests without the secret", async () => {
   assert.equal(waits.length, 1);
 });
 
-// --- AI memes ---
+// --- meme queue ---
 
-const IDEA = { top: "I control everything.", bottom: "Except the wifi.", scene_top: "The character points at a map.",
-               scene_bottom: "The character shakes a router." };
+const dm = (user, extra) => bot().handle({ message: { message_id: ++mid, chat: { id: user.id, type: "private" }, from: user, ...extra } });
+const pic = (id) => [{ file_id: `${id}-small`, file_unique_id: `${id}s` }, { file_id: `${id}-big`, file_unique_id: `${id}b` }];
 
-function fakeAi({ ideas = [IDEA], flagFirst = false } = {}) {
-  const log = [];
-  let images = 0;
-  return { log, async run(model, input) {
-    log.push([model, input]);
-    if (input.messages) return { choices: [{ message: { content: JSON.stringify(ideas[Math.min(log.filter(([, i]) => i.messages).length - 1, ideas.length - 1)]) } }] };
-    if (flagFirst && images++ === 0) throw new Error("AiError: 3030: Your output has been flagged.");
-    return { image: Buffer.from("PNGDATA").toString("base64") };
-  } };
-}
-
-test("/meme is admin-only, queues the job, and the next tick posts one photo", async () => {
-  env.AI = fakeAi(); env.REF_IMAGE = new Uint8Array([1, 2, 3]);
-  await say(ALICE, "/meme");
-  await bot().tick();
-  assert.equal(of("sendPhoto").length, 0);
-  await say(ADMIN, "/meme the wifi");
-  await bot().tick();
-  const [photo] = of("sendPhoto");
-  assert.equal(photo.chat_id, String(CHAT));
-  assert.equal(await photo.photo.text(), "PNGDATA");
-  assert.match(env.AI.log[0][1].messages[1].content, /the wifi/);
-  const form = await new Response(env.AI.log[1][1].multipart.body, { headers: { "content-type": env.AI.log[1][1].multipart.contentType } }).formData();
-  assert.match(form.get("prompt"), /reads "I CONTROL EVERYTHING\." .* reads "EXCEPT THE WIFI\."/);
-  assert.equal(form.get("input_image_0").size, 3);
-  await bot().tick();
-  assert.equal(of("sendPhoto").length, 1);
+test("admins fill the meme queue by DM; duplicates and non-admins are ignored", async () => {
+  await dm(ALICE, { photo: pic("a") });
+  assert.equal(await bot().memesWaiting(), 0);
+  await dm(ADMIN, { photo: pic("a"), caption: "Mondays." });
+  await dm(ADMIN, { photo: pic("a") });
+  await dm(ADMIN, { photo: pic("b") });
+  assert.deepEqual(texts().slice(-3), ["Added. 1 in the queue.", "Already have that one. 1 in the queue.", "Added. 2 in the queue."]);
+  assert.equal(of("sendMessage").at(-1).chat_id, ADMIN.id);
 });
 
-test("scheduled meme posts once per configured UTC hour", async () => {
-  env.AI = fakeAi(); env.MEME_HOURS = "10,18";
+test("queued memes post oldest first, once per scheduled hour, and the uploader hears when it runs dry", async () => {
+  env.MEME_HOURS = "10,18";
+  await dm(ADMIN, { photo: pic("a"), caption: "Mondays." });
+  await dm(ADMIN, { photo: pic("b") });
   clock = Date.UTC(2026, 9, 6, 9, 59) / 1000;
   await bot().tick();
   assert.equal(of("sendPhoto").length, 0);
   clock += 60; await bot().tick(); clock += 60; await bot().tick();
-  assert.equal(of("sendPhoto").length, 1);
+  assert.deepEqual(of("sendPhoto"), [{ chat_id: CHAT, photo: "a-big", caption: "Mondays." }]);
   clock += 8 * 3600; await bot().tick();
+  assert.deepEqual(of("sendPhoto")[1], { chat_id: CHAT, photo: "b-big" });
+  assert.match(texts().at(-1), /last meme in the queue/);
+  assert.equal(of("sendMessage").at(-1).chat_id, ADMIN.id);
+  clock += 16 * 3600; await bot().tick();
   assert.equal(of("sendPhoto").length, 2);
-  const recent = JSON.parse(await bot().kv("meme_recent"));
-  assert.equal(recent.length, 2);
-  assert.notEqual(recent[0].topic, recent[1].topic);
 });
 
-test("a flagged image is retried; unusable or off-limits captions are never posted", async () => {
-  env.AI = fakeAi({ flagFirst: true });
-  assert.equal(await bot().postMeme(null), true);
-  assert.equal(of("sendPhoto").length, 1);
-  calls = [];
-  env.AI = fakeAi({ ideas: [{ ...IDEA, bottom: "EXCEPT THE COIN PRICE." }, { top: "x" }] });
+test("/meme posts the next one now (admins only); /memes reports the queue", async () => {
+  env.MEME_HOURS = "10,18";
+  await dm(ADMIN, { photo: pic("a") });
+  await say(ALICE, "/meme");
+  assert.equal(of("sendPhoto").length, 0);
+  await say(ADMIN, "/memes");
+  assert.equal(texts().at(-1), "1 memes in the queue. Posting daily at 10:00 and 18:00 UTC.");
   await say(ADMIN, "/meme");
-  await bot().tick();
-  assert.equal(of("sendPhoto").length, 0);
-  assert.equal(env.AI.log.filter(([, i]) => i.multipart).length, 0);
-  assert.match(texts().at(-1), /jammed/);
-});
-
-test("no AI binding: memes are skipped without breaking the tick", async () => {
-  env.MEME_HOURS = "10"; clock = Date.UTC(2026, 9, 6, 10, 0) / 1000;
-  await bot().tick();
-  assert.equal(of("sendPhoto").length, 0);
+  assert.equal(of("sendPhoto").length, 1);
+  await say(ADMIN, "/meme");
+  assert.match(texts().at(-1), /queue is empty/);
+  await dm(ALICE, { text: "/memes" });
+  assert.match(texts().at(-1), /DRDOOM bot/);
 });
