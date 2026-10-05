@@ -24,7 +24,7 @@ function d1() {
   } }) };
 }
 
-let calls, clock, env, mid, nextId, rpc;
+let calls, clock, env, index, mid, nextId, rpc;
 
 function fakeFetch(url, init) {
   const json = (body, status = 200) => new Response(JSON.stringify(body), { status });
@@ -34,10 +34,12 @@ function fakeFetch(url, init) {
     calls.push([method, params]);
     if (method === "getChatAdministrators") return json({ ok: true, result: [{ user: ADMIN }] });
     if (method === "getChat") return json({ ok: true, result: { permissions: { can_send_messages: true, can_send_photos: true } } });
+    if (method === "sendPhoto" && String(params.photo).includes("broken")) return json({ ok: false, description: "wrong file" });
     if (method === "sendMessage" || method === "sendPhoto") return json({ ok: true, result: { message_id: ++nextId } });
     return json({ ok: true, result: true });
   }
   if (url.includes("dexscreener")) return json({ pairs: [{ marketCap: 4200 }] });
+  if (url.includes("raw.githubusercontent.com")) return index === null ? json({}, 404) : json(index);
   const { method, params } = JSON.parse(init.body);
   return rpc(method, params, json);
 }
@@ -59,7 +61,7 @@ const press = (user, data) =>
   bot().handle({ callback_query: { id: "cq", from: user, data, message: { chat: { id: CHAT } } } });
 
 beforeEach(() => {
-  calls = []; clock = 1_000_000; mid = 0; nextId = 1000; rpc = null;
+  calls = []; clock = 1_000_000; index = null; mid = 0; nextId = 1000; rpc = null;
   env = { DB: d1(), BOT_TOKEN: "x", CHAT_ID: String(CHAT), BUY_ALERTS: "0", WEBHOOK_SECRET: "s3cret" };
 });
 
@@ -286,4 +288,31 @@ test("/meme posts the next one now (admins only); /memes reports the queue", asy
   assert.match(texts().at(-1), /queue is empty/);
   await dm(ALICE, { text: "/memes" });
   assert.match(texts().at(-1), /DRDOOM bot/);
+});
+
+test("GitHub folder feeds the queue: new files join, deleted ones leave, posted ones never repeat", async () => {
+  env.MEME_REPO = "Viljo666/drdoom-memes";
+  const raw = "https://raw.githubusercontent.com/Viljo666/drdoom-memes/main/memes/";
+  index = ["memes/01 monday.png", "memes/02.jpg", "memes/notes.txt", "../secret.png"];
+  await say(ADMIN, "/memes");
+  assert.match(texts().at(-1), /^2 memes in the queue/);
+  await say(ADMIN, "/meme");
+  assert.deepEqual(of("sendPhoto"), [{ chat_id: CHAT, photo: raw + "01%20monday.png" }]);
+  index = ["memes/01 monday.png", "memes/03.webp"];          // 02 deleted before its turn, 03 added
+  await say(ADMIN, "/meme");
+  assert.equal(of("sendPhoto")[1].photo, raw + "03.webp");
+  index = null;                                               // GitHub unreachable: queue untouched
+  await say(ADMIN, "/meme");
+  assert.equal(of("sendPhoto").length, 2);
+  assert.match(texts().at(-1), /queue is empty/);
+});
+
+test("a file Telegram rejects is skipped instead of blocking the queue", async () => {
+  env.MEME_REPO = "Viljo666/drdoom-memes";
+  index = ["memes/broken.png", "memes/good.png"];
+  await say(ADMIN, "/meme");
+  assert.equal(of("sendPhoto").length, 2);
+  assert.equal(await bot().memesWaiting(), 0);
+  await say(ADMIN, "/meme");
+  assert.equal(of("sendPhoto").length, 2);
 });

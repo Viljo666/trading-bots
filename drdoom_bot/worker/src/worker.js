@@ -8,8 +8,9 @@
 //   - The free plan allows 50 outbound requests per invocation; `budget` keeps the buy
 //     poll inside that.
 //
-// It also does one thing the Python version doesn't: a meme queue. Admins send finished
-// meme images to the bot in a private chat; it posts one at each of MEME_HOURS.
+// It also does one thing the Python version doesn't: a meme queue, posted from at each of
+// MEME_HOURS. It fills from the memes/ folder of the public GitHub repo MEME_REPO (that
+// repo's workflow publishes the file list as index.json) and from photos admins DM the bot.
 //
 // Secrets: BOT_TOKEN, WEBHOOK_SECRET. Vars: see wrangler.toml.
 
@@ -90,6 +91,7 @@ export class Bot {
       gateMinutes: Number(env.GATE_TIMEOUT_MIN || 5),
       memeHours: (env.MEME_HOURS ?? "").split(",").map((h) => h.trim()).filter(Boolean).map(Number),   // UTC
       memeChat: env.MEME_CHAT_ID ? Number(env.MEME_CHAT_ID) : Number(env.CHAT_ID),
+      memeRepo: env.MEME_REPO ? `https://raw.githubusercontent.com/${env.MEME_REPO}/main/` : null,
       allowed: [hostOf(site), ...(env.ALLOWED_DOMAINS || "x.com,twitter.com").split(",")
         .map((d) => d.trim().toLowerCase()).filter(Boolean)],
       // Links to these are fine only when they point at OUR token, not someone else's.
@@ -582,27 +584,59 @@ export class Bot {
                      { chatId: msg.chat.id });
   }
 
+  // Mirror the GitHub folder into the queue: new files are added, and files deleted from
+  // the folder before their turn are dropped. Already-posted memes are never touched.
+  async syncMemes() {
+    if (!this.cfg.memeRepo) return;
+    let files;
+    try {
+      const r = await this.http(this.cfg.memeRepo + "index.json");
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      files = (await r.json()).filter((f) => typeof f === "string" && /^memes\/[^/]+\.(png|jpe?g|webp)$/i.test(f));
+    } catch (e) {
+      console.warn(`meme index failed: ${e.message}`);   // keep the queue as it is
+      return;
+    }
+    const known = await this.all("SELECT id, unique_id, posted_at FROM meme WHERE unique_id LIKE 'gh:%'");
+    const have = new Set(known.map((m) => m.unique_id));
+    const listed = new Set(files.map((f) => "gh:" + f));
+    const fresh = files.filter((f) => !have.has("gh:" + f)).slice(0, 20);
+    if (fresh.length) {
+      const url = (f) => this.cfg.memeRepo + f.split("/").map(encodeURIComponent).join("/");
+      await this.run(`INSERT OR IGNORE INTO meme (file_id, unique_id) VALUES ${fresh.map(() => "(?, ?)").join(", ")}`,
+                     ...fresh.flatMap((f) => [url(f), "gh:" + f]));
+    }
+    const gone = known.filter((m) => m.posted_at === null && !listed.has(m.unique_id)).slice(0, 50).map((m) => m.id);
+    if (gone.length) await this.run(`DELETE FROM meme WHERE id IN (${gone.map(() => "?").join(", ")})`, ...gone);
+  }
+
   // Post the oldest unposted meme. Returns false when the queue is empty.
   async postMeme() {
-    const meme = await this.one("SELECT id, file_id, caption, added_by FROM meme WHERE posted_at IS NULL ORDER BY id LIMIT 1");
-    if (!meme) return false;
-    const sent = await this.tg("sendPhoto", { chat_id: this.cfg.memeChat, photo: meme.file_id,
-                                              ...(meme.caption ? { caption: meme.caption } : {}) });
-    if (!sent) return false;
-    await this.run("UPDATE meme SET posted_at=? WHERE id=?", this.now(), meme.id);
-    if ((await this.memesWaiting()) === 0) {
-      await this.send("That was the last meme in the queue. Send me more photos to refill it.", { chatId: meme.added_by });
+    await this.syncMemes();
+    for (let tries = 0; tries < 3; tries++) {
+      const meme = await this.one("SELECT id, file_id, caption, added_by FROM meme WHERE posted_at IS NULL ORDER BY id LIMIT 1");
+      if (!meme) return false;
+      const sent = await this.tg("sendPhoto", { chat_id: this.cfg.memeChat, photo: meme.file_id,
+                                                ...(meme.caption ? { caption: meme.caption } : {}) });
+      // A file Telegram rejects (too big, not an image) is marked failed so it can't block the queue.
+      await this.run("UPDATE meme SET posted_at=? WHERE id=?", sent ? this.now() : -1, meme.id);
+      if (!sent) continue;
+      if (meme.added_by && (await this.memesWaiting()) === 0) {
+        await this.send("That was the last meme in the queue. Send me more photos to refill it.", { chatId: meme.added_by });
+      }
+      return true;
     }
-    return true;
+    return false;
   }
 
   async cmdMeme(msg, arg, chatId = this.cfg.chatId) {
     if (!(await this.postMeme())) {
-      await this.send("The meme queue is empty. Send photos to me in a private chat to fill it.", { chatId, ttl: chatId === this.cfg.chatId ? NOTICE_TTL : undefined });
+      await this.send("The meme queue is empty. Add images to the GitHub folder or send me photos in a private chat.", { chatId, ttl: chatId === this.cfg.chatId ? NOTICE_TTL : undefined });
     }
   }
 
   async cmdMemes(msg, arg, chatId = this.cfg.chatId) {
+    await this.syncMemes();
     const hours = this.cfg.memeHours.map((h) => `${String(h).padStart(2, "0")}:00`).join(" and ") || "never";
     await this.send(`${await this.memesWaiting()} memes in the queue. Posting daily at ${hours} UTC.`,
                     { chatId, ttl: chatId === this.cfg.chatId ? NOTICE_TTL : undefined });

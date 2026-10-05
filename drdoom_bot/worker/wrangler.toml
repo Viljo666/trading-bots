@@ -13,6 +13,7 @@ CHAT_ID = "-1003955294607"   # DRDOOM Community Chat (@drdoommemechat)
 MIN_BUY_SOL = "0.1"
 BUY_ALERTS = "1"
 MEME_HOURS = "10,18"           # UTC hours to post one meme from the queue; "" turns it off
+MEME_REPO = "Viljo666/drdoom-memes"   # public repo; images go in its memes/ folder
 # api.mainnet-beta.solana.com answers Cloudflare with HTTP 403; PublicNode is keyless.
 SOLANA_RPC_URL = "https://solana-rpc.publicnode.com"
 
