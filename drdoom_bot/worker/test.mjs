@@ -31,6 +31,7 @@ function fakeFetch(url, init) {
   if (url.startsWith("https://api.x.com/")) {
     xCalls.push({ url, auth: init.headers.authorization, body: init.body });
     if (xFail) return json({ title: "CreditsDepleted" }, 402);
+    if (url.endsWith("/users/me")) return json({ data: { id: "1", username: "DRDOOMmeme" } });
     return json({ data: { id: url.endsWith("/media/upload") ? "777" : "888" } });
   }
   if (url.includes("api.telegram.org/file/") || url.includes("/main/memes/")) return new Response("IMG:" + url.split("/").pop());
@@ -381,4 +382,18 @@ test("without X keys nothing is sent to X", async () => {
   await say(ADMIN, "/meme");
   assert.equal(of("sendPhoto").length, 1);
   assert.equal(xCalls.length, 0);
+});
+
+test("/xcheck reports key shapes without revealing them, and who the keys belong to", async () => {
+  Object.assign(env, { X_API_KEY: "k".repeat(25) + "\n", X_API_SECRET: "s".repeat(50), X_ACCESS_TOKEN: "123-" + "t".repeat(40), X_ACCESS_SECRET: "z".repeat(45) });
+  await dm(ALICE, { text: "/xcheck" });
+  assert.equal(xCalls.length, 0);
+  await dm(ADMIN, { text: "/xcheck" });
+  assert.match(texts().at(-1), /API key: 25 chars\nAPI secret: 50 chars\nAccess token: 44 chars\nAccess secret: 45 chars\nShape: looks normal\nIdentity call: OK, keys belong to @DRDOOMmeme/);
+  assert.match(xCalls[0].auth, /^OAuth oauth_consumer_key="k{25}", /);
+  assert.ok(!texts().at(-1).includes("kkkk"));
+  Object.assign(env, { X_ACCESS_TOKEN: "s".repeat(50), X_API_KEY: "AAAAAAAAAAAAAAAAAAAAAJg7" + "b".repeat(60) });
+  xFail = true;
+  await dm(ADMIN, { text: "/xcheck" });
+  assert.match(texts().at(-1), /two of the keys are the same value; one value looks like the Bearer Token.*not in the usual &lt;numbers&gt;-&lt;letters&gt; form.*possibly swapped.*HTTP 402/s);
 });

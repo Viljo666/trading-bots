@@ -121,9 +121,10 @@ export class Bot {
       gateMinutes: Number(env.GATE_TIMEOUT_MIN || 5),
       memeHours: (env.MEME_HOURS ?? "").split(",").map((h) => h.trim()).filter(Boolean).map(Number),   // UTC
       memeChat: env.MEME_CHAT_ID ? Number(env.MEME_CHAT_ID) : Number(env.CHAT_ID),
+      // Trimmed: a pasted secret easily picks up a stray space or newline, which breaks the signature.
       x: env.X_API_KEY && env.X_API_SECRET && env.X_ACCESS_TOKEN && env.X_ACCESS_SECRET
-        ? { consumerKey: env.X_API_KEY, consumerSecret: env.X_API_SECRET, token: env.X_ACCESS_TOKEN,
-            tokenSecret: env.X_ACCESS_SECRET }
+        ? { consumerKey: env.X_API_KEY.trim(), consumerSecret: env.X_API_SECRET.trim(),
+            token: env.X_ACCESS_TOKEN.trim(), tokenSecret: env.X_ACCESS_SECRET.trim() }
         : null,
       memeRepo: env.MEME_REPO ? `https://raw.githubusercontent.com/${env.MEME_REPO}/main/` : null,
       allowed: [hostOf(site), ...(env.ALLOWED_DOMAINS || "x.com,twitter.com").split(",")
@@ -206,9 +207,10 @@ export class Bot {
   async onPrivate(msg) {
     const [cmd] = this.parseCommand(msg);
     const chatId = msg.chat.id;
-    if ((msg.photo || cmd === "memes" || cmd === "meme") && (await this.isAdmin(msg))) {
+    if ((msg.photo || ["memes", "meme", "xcheck"].includes(cmd)) && (await this.isAdmin(msg))) {
       if (cmd === "memes") return this.cmdMemes(msg, "", chatId);
       if (cmd === "meme") return this.cmdMeme(msg, "", chatId);
+      if (cmd === "xcheck") return this.cmdXcheck(msg, "", chatId);
       return this.addMeme(msg);
     }
     return (INFO[cmd] || INFO.help).call(this, chatId);
@@ -666,11 +668,11 @@ export class Bot {
 
   // ---------- X ----------
 
-  async xCall(path, init) {
+  async xCall(path, init = {}, method = "POST") {
     const url = X_API + path;
-    const authorization = await oauthHeader({ method: "POST", url, ...this.cfg.x, timestamp: Math.floor(this.now()),
+    const authorization = await oauthHeader({ method, url, ...this.cfg.x, timestamp: Math.floor(this.now()),
                                               nonce: crypto.randomUUID().replace(/-/g, "") });
-    const r = await this.http(url, { method: "POST", ...init, headers: { ...init.headers, authorization } });
+    const r = await this.http(url, { method, ...init, headers: { ...init.headers, authorization } });
     const text = await r.text();
     if (!r.ok) throw new Error(`X ${path} HTTP ${r.status}: ${text.slice(0, 200)}`);
     return JSON.parse(text).data;
@@ -698,6 +700,33 @@ export class Bot {
     return this.xCall("/tweets", { headers: { "content-type": "application/json" },
                                    body: JSON.stringify({ text: `${line}\n\n$${this.cfg.ticker}`.trim(),
                                                           media: { media_ids: [media.id] } }) });
+  }
+
+  // /xcheck: why is X rejecting us? Reports the shape of each key (never the key) and asks X
+  // who the keys belong to. That identity call is a billed read, about a cent.
+  async cmdXcheck(msg, arg, chatId = this.cfg.chatId) {
+    const x = this.cfg.x;
+    if (!x) return this.send("X posting is off: the four X keys are not all set.", { chatId });
+    const problems = [];
+    const values = Object.values(x);
+    if (new Set(values).size < 4) problems.push("two of the keys are the same value");
+    if (values.some((v) => /\s/.test(v))) problems.push("a key contains a space or line break");
+    if (values.some((v) => v.startsWith("AAAAAAAAAAAA"))) problems.push("one value looks like the Bearer Token, which is not used");
+    if (!/^\d+-\w+$/.test(x.token)) problems.push("the access token is not in the usual <numbers>-<letters> form");
+    if (x.consumerKey.length > x.consumerSecret.length) problems.push("API key is longer than API secret: possibly swapped");
+    if (x.token.length < x.consumerKey.length) problems.push("access token is shorter than the API key: possibly in the wrong slot");
+    let identity;
+    try {
+      const me = await this.xCall("/users/me", {}, "GET");
+      identity = `OK, keys belong to @${esc(me.username)}`;
+    } catch (e) {
+      identity = `<code>${esc(e.message)}</code>`;
+    }
+    const report = `<b>X keys check</b>\nAPI key: ${x.consumerKey.length} chars\nAPI secret: ${x.consumerSecret.length} chars\n` +
+      `Access token: ${x.token.length} chars\nAccess secret: ${x.tokenSecret.length} chars\n` +
+      `Shape: ${problems.length ? esc(problems.join("; ")) : "looks normal"}\nIdentity call: ${identity}`;
+    console.log(report);
+    return this.send(report, { chatId });
   }
 
   // X is best-effort: a failure there never undoes or delays the Telegram post.
@@ -770,7 +799,7 @@ const INFO = { ca: P.cmdCa, contract: P.cmdCa, site: P.cmdSite, website: P.cmdSi
                chart: P.cmdChart, price: P.cmdPrice, rules: P.cmdRules, help: P.cmdHelp, start: P.cmdHelp };
 const MEMBER = { rank: P.cmdRank, top: P.cmdTop, submit: P.cmdSubmit };
 const ADMIN = { warn: P.cmdWarn, unwarn: P.cmdUnwarn, mute: P.cmdMute, unmute: P.cmdUnmute,
-                ban: P.cmdBan, contest: P.cmdContest, raid: P.cmdRaid, meme: P.cmdMeme, memes: P.cmdMemes };
+                ban: P.cmdBan, contest: P.cmdContest, raid: P.cmdRaid, meme: P.cmdMeme, memes: P.cmdMemes, xcheck: P.cmdXcheck };
 
 export default {
   async fetch(request, env, ctx) {
