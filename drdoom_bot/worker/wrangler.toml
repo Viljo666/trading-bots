@@ -1,0 +1,22 @@
+name = "drdoom-bot"
+main = "src/worker.js"
+compatibility_date = "2026-09-01"
+
+[triggers]
+crons = ["* * * * *"]
+
+[observability]
+enabled = true
+
+[vars]
+CHAT_ID = "-1003955294607"   # DRDOOM Community Chat (@drdoommemechat)
+MIN_BUY_SOL = "0.1"
+BUY_ALERTS = "1"
+
+# database_id is filled in after `wrangler d1 create drdoom-bot`.
+[[d1_databases]]
+binding = "DB"
+database_name = "drdoom-bot"
+database_id = "REPLACE_AFTER_D1_CREATE"
+
+# Secrets (wrangler secret put ...): BOT_TOKEN, WEBHOOK_SECRET, optionally SOLANA_RPC_URL

@@ -43,3 +43,7 @@ stock_screener/
 
 # --- drdoom community bot state ---
 *.db
+
+# --- cloudflare worker tooling ---
+node_modules/
+.wrangler/
