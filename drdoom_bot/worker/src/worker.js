@@ -8,7 +8,11 @@
 //   - The free plan allows 50 outbound requests per invocation; `budget` keeps the buy
 //     poll inside that.
 //
-// Secrets: BOT_TOKEN, WEBHOOK_SECRET (optionally SOLANA_RPC_URL). Vars: see wrangler.toml.
+// It also does one thing the Python version doesn't: AI-generated memes (Workers AI),
+// posted at MEME_HOURS and on an admin's /meme.
+//
+// Secrets: BOT_TOKEN, WEBHOOK_SECRET. Vars: see wrangler.toml.
+import { Buffer } from "node:buffer";
 
 const RANKS = [[0, "Bystander"], [10, "Henchman"], [50, "Minion"], [150, "Enforcer"],
                [400, "Lieutenant"], [1000, "Mastermind"]];
@@ -20,6 +24,32 @@ const ADMIN_CACHE_TTL = 300;
 const SIG_PAGE = 40;
 const SUBREQUEST_BUDGET = 45;   // of the free plan's 50
 const BUY_SEND_RESERVE = 12;    // requests kept back for posting alerts and housekeeping
+
+const MEME_ATTEMPTS = 2;       // the image model's output filter rejects some prompts at random
+const MEME_RECENT = 25;        // topics and captions remembered so memes don't repeat
+const MEME_SYSTEM = `You write two-panel memes starring DRDOOM, a hooded, masked cartoon villain mascot.
+The formula: panel 1 is a grand villain boast. Panel 2 undercuts it with a small, relatable everyday problem.
+Rules: captions are ALL CAPS, at most 6 words each, end with a period, and work without any explanation.
+Never mention crypto, prices, money, politics, religion, real people, brands, weapons or violence.
+Scenes are one sentence each, describing what the character is doing and where, with no text in them.
+Examples:
+{"top":"NO SYSTEM CAN STOP ME.","bottom":"EXCEPT MY OWN PASSWORD.","scene_top":"The character gestures confidently at a huge control room full of glowing screens.","scene_bottom":"The character sits head in hand in front of a monitor showing a login error."}
+{"top":"I WILL CONQUER THIS WORLD.","bottom":"AFTER BOARDING GROUP 6.","scene_top":"The character stands tall in a bright airport terminal.","scene_bottom":"The character waits in a long boarding queue holding a suitcase, annoyed."}
+{"top":"SUNDAY NIGHT: WORLD DOMINATION.","bottom":"MONDAY MORNING: NEED COFFEE.","scene_top":"The character stands on a castle balcony at night, arms spread.","scene_bottom":"The character slumps at a kitchen table holding a coffee mug."}
+Reply with one new JSON object only.`;
+// The everyday problem is picked here, not by the model, so consecutive memes differ.
+const MEME_TOPICS = ["wifi dropping", "laundry day", "a traffic jam", "assembling flat-pack furniture", "the dentist",
+  "finding a parking spot", "the group chat", "autocorrect", "a dying phone battery", "a long meeting", "a self-checkout machine",
+  "a software update", "getting caught in the rain", "a cat that ignores him", "the alarm clock", "a tangled charging cable",
+  "an empty fridge", "the gym", "a slow elevator", "a forgotten umbrella", "stepping on a toy brick", "a jammed zipper",
+  "a squeaky shopping cart", "losing the TV remote", "a pop-up asking to accept cookies", "a video call on mute",
+  "waiting for a delivery", "a wobbly table", "folding a fitted sheet", "untangling headphones", "a paper cut",
+  "the neighbour's leaf blower", "a low-battery smoke alarm", "a stuck jar lid", "running for the bus", "a long queue at the bakery",
+  "reading glasses he cannot find", "a captcha", "the office microwave queue", "a houseplant he keeps forgetting to water"];
+const MEME_BANNED = /crypto|coin|price|pump|moon|invest|profit|\$|kill|gun|bomb|blood|nazi|sex/i;
+const MEME_SCHEMA = { type: "object", required: ["top", "bottom", "scene_top", "scene_bottom"],
+                      properties: { top: { type: "string" }, bottom: { type: "string" },
+                                    scene_top: { type: "string" }, scene_bottom: { type: "string" } } };
 
 const SOL_ADDRESS = /\b[1-9A-HJ-NP-Za-km-z]{32,44}\b/g;
 const EVM_ADDRESS = /\b0x[a-fA-F0-9]{40}\b/g;
@@ -71,6 +101,8 @@ export function parseBuy(tx, mint, signature = "") {
 export class Bot {
   constructor(env, { fetch = globalThis.fetch.bind(globalThis), now = () => Date.now() / 1000 } = {}) {
     this.db = env.DB;
+    this.ai = env.AI;
+    this.refImage = env.REF_IMAGE;   // character art, bundled by index.js
     this.fetch = fetch;
     this.now = now;
     this.requests = 0;
@@ -85,6 +117,10 @@ export class Bot {
       buyAlerts: (env.BUY_ALERTS ?? "1") === "1",
       minBuySol: Number(env.MIN_BUY_SOL || 0.1),
       gateMinutes: Number(env.GATE_TIMEOUT_MIN || 5),
+      memeHours: (env.MEME_HOURS ?? "").split(",").map((h) => h.trim()).filter(Boolean).map(Number),   // UTC
+      memeChat: env.MEME_CHAT_ID ? Number(env.MEME_CHAT_ID) : Number(env.CHAT_ID),
+      imageModel: env.MEME_IMAGE_MODEL || "@cf/black-forest-labs/flux-2-klein-9b",
+      textModel: env.MEME_TEXT_MODEL || "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
       allowed: [hostOf(site), ...(env.ALLOWED_DOMAINS || "x.com,twitter.com").split(",")
         .map((d) => d.trim().toLowerCase()).filter(Boolean)],
       // Links to these are fine only when they point at OUR token, not someone else's.
@@ -354,7 +390,7 @@ export class Bot {
                      "/ca · /buy · /price · /chart · /site · /rules\n" +
                      "/rank · /top — villain ranks from chat activity\n" +
                      "/submit — enter the meme contest (send a photo with /submit as the caption)\n\n" +
-                     "<i>Admins:</i> /contest start &lt;topic&gt; · /contest end · /raid &lt;x link&gt; [lock min] · " +
+                     "<i>Admins:</i> /contest start &lt;topic&gt; · /contest end · /raid &lt;x link&gt; [lock min] · /meme [topic] · " +
                      "/warn /unwarn /mute [h] /unmute /ban (as a reply)", { chatId });
   }
 
@@ -553,6 +589,104 @@ export class Bot {
     }
   }
 
+  // ---------- AI memes ----------
+
+  // /meme only queues the job: generation takes longer than a webhook handler may run,
+  // so the next cron tick does the work.
+  async cmdMeme(msg, arg) {
+    await this.kvSet("meme_request", arg.slice(0, 80) || "-");
+    await this.send("Summoning a meme. Give it a minute.", { ttl: 90 });
+  }
+
+  async recentMemes() { return JSON.parse((await this.kv("meme_recent")) || "[]"); }
+
+  // Ask the text model for captions and scenes about `topic`. Null if the reply is unusable.
+  async memeIdea(topic, recent) {
+    const avoid = recent.map((r) => r.top).filter(Boolean).slice(-8).join(" / ");
+    const out = await this.ai.run(this.cfg.textModel, {
+      messages: [{ role: "system", content: MEME_SYSTEM },
+                 { role: "user", content: `Write a new meme. The everyday problem: ${topic}.` +
+                                          (avoid ? ` Do not reuse these opening lines: ${avoid}` : "") }],
+      temperature: 1, max_tokens: 220, response_format: { type: "json_schema", json_schema: MEME_SCHEMA } });
+    let idea = out?.choices?.[0]?.message?.content ?? out?.response;
+    try {
+      if (typeof idea === "string") idea = JSON.parse(idea);
+    } catch {
+      return null;
+    }
+    const fields = ["top", "bottom", "scene_top", "scene_bottom"];
+    if (!idea || fields.some((f) => typeof idea[f] !== "string" || !idea[f].trim())) return null;
+    idea = Object.fromEntries(fields.map((f) => [f, idea[f].replace(/["\n]/g, " ").trim()]));
+    idea.top = idea.top.toUpperCase();
+    idea.bottom = idea.bottom.toUpperCase();
+    if (idea.top.length > 48 || idea.bottom.length > 48 || idea.scene_top.length > 240 || idea.scene_bottom.length > 240) return null;
+    return MEME_BANNED.test(fields.map((f) => idea[f]).join(" ")) ? null : idea;
+  }
+
+  // Render the idea with the image model, using the bundled art to keep the character on-model.
+  async memeImage(idea) {
+    const form = new FormData();
+    form.append("prompt",
+      "Two-panel comic meme, one panel above the other, bold inked comic-book style with neon green glow, starring the " +
+      "hooded mascot character from the reference image: black hooded cloak with green lining, angular dark metal mask " +
+      "covering the whole face, glowing green eyes, metal gauntlets. " +
+      `TOP PANEL: ${idea.scene_top} Large bold caption text reads "${idea.top}" ` +
+      `BOTTOM PANEL: ${idea.scene_bottom} Large bold caption text reads "${idea.bottom}" ` +
+      "Captions in heavy white and neon green block letters with black outline, spelled exactly as given. " +
+      'The small word "DRDOOM" appears once, centered at the very bottom edge.');
+    form.append("width", "1024");
+    form.append("height", "1024");
+    if (this.refImage) form.append("input_image_0", new Blob([this.refImage], { type: "image/jpeg" }), "ref.jpg");
+    const body = new Response(form);
+    const out = await this.ai.run(this.cfg.imageModel, {
+      multipart: { body: body.body, contentType: body.headers.get("content-type") } });
+    return Buffer.from(out.image, "base64");
+  }
+
+  // Generate one meme and post it. `wanted` is an admin's topic, or null to pick one.
+  async postMeme(wanted) {
+    if (!this.ai) return false;
+    const recent = await this.recentMemes();
+    const used = new Set(recent.map((r) => r.topic));
+    const fresh = MEME_TOPICS.filter((t) => !used.has(t));
+    for (let attempt = 0; attempt < MEME_ATTEMPTS; attempt++) {
+      const pool = fresh.length ? fresh : MEME_TOPICS;
+      const topic = attempt === 0 && wanted ? wanted : pool[Math.floor(Math.random() * pool.length)];
+      try {
+        const idea = await this.memeIdea(topic, recent);
+        if (!idea) continue;
+        const form = new FormData();
+        form.append("chat_id", String(this.cfg.memeChat));
+        form.append("photo", new Blob([await this.memeImage(idea)], { type: "image/png" }), "meme.png");
+        const r = await this.http(`https://api.telegram.org/bot${this.cfg.token}/sendPhoto`, { method: "POST", body: form });
+        const sent = await r.json();
+        if (!sent.ok) throw new Error(`sendPhoto rejected: ${sent.description}`);
+        await this.kvSet("meme_recent", JSON.stringify([...recent, { topic, top: idea.top }].slice(-MEME_RECENT)));
+        return true;
+      } catch (e) {
+        console.warn(`meme attempt ${attempt + 1} failed (${topic}): ${e.message || e}`);
+      }
+    }
+    return false;
+  }
+
+  async memeTick() {
+    const request = await this.kv("meme_request");
+    if (request) {
+      await this.kvSet("meme_request", null);   // cleared first: a failing meme must not retry every minute
+      if (!(await this.postMeme(request === "-" ? null : request))) {
+        await this.send("The meme machine jammed. Try /meme again.", { ttl: 120 });
+      }
+      return;
+    }
+    const d = new Date(this.now() * 1000);
+    if (!this.cfg.memeHours.includes(d.getUTCHours())) return;
+    const slot = d.toISOString().slice(0, 13);   // one scheduled meme per UTC hour
+    if ((await this.kv("meme_slot")) === slot) return;
+    await this.kvSet("meme_slot", slot);
+    await this.postMeme(null);
+  }
+
   // ---------- callbacks / periodic work ----------
 
   answer(cq, text) { return this.tg("answerCallbackQuery", { callback_query_id: cq.id, text }); }
@@ -574,6 +708,7 @@ export class Bot {
       await this.run("DELETE FROM ephemeral WHERE msg_id=?", msg_id);
     }
     await this.postBuys();
+    await this.memeTick();   // last: it is the slow one
   }
 }
 
@@ -585,7 +720,7 @@ const INFO = { ca: P.cmdCa, contract: P.cmdCa, site: P.cmdSite, website: P.cmdSi
                chart: P.cmdChart, price: P.cmdPrice, rules: P.cmdRules, help: P.cmdHelp, start: P.cmdHelp };
 const MEMBER = { rank: P.cmdRank, top: P.cmdTop, submit: P.cmdSubmit };
 const ADMIN = { warn: P.cmdWarn, unwarn: P.cmdUnwarn, mute: P.cmdMute, unmute: P.cmdUnmute,
-                ban: P.cmdBan, contest: P.cmdContest, raid: P.cmdRaid };
+                ban: P.cmdBan, contest: P.cmdContest, raid: P.cmdRaid, meme: P.cmdMeme };
 
 export default {
   async fetch(request, env, ctx) {

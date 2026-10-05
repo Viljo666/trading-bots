@@ -30,7 +30,7 @@ function fakeFetch(url, init) {
   const json = (body, status = 200) => new Response(JSON.stringify(body), { status });
   if (url.includes("api.telegram.org")) {
     const method = url.split("/").pop();
-    const params = JSON.parse(init.body);
+    const params = typeof init.body === "string" ? JSON.parse(init.body) : Object.fromEntries(init.body);
     calls.push([method, params]);
     if (method === "getChatAdministrators") return json({ ok: true, result: [{ user: ADMIN }] });
     if (method === "getChat") return json({ ok: true, result: { permissions: { can_send_messages: true, can_send_photos: true } } });
@@ -239,4 +239,71 @@ test("webhook rejects requests without the secret", async () => {
   assert.equal(waits.length, 0);
   assert.equal((await worker.fetch(req({ "X-Telegram-Bot-Api-Secret-Token": "s3cret" }), env, ctx)).status, 200);
   assert.equal(waits.length, 1);
+});
+
+// --- AI memes ---
+
+const IDEA = { top: "I control everything.", bottom: "Except the wifi.", scene_top: "The character points at a map.",
+               scene_bottom: "The character shakes a router." };
+
+function fakeAi({ ideas = [IDEA], flagFirst = false } = {}) {
+  const log = [];
+  let images = 0;
+  return { log, async run(model, input) {
+    log.push([model, input]);
+    if (input.messages) return { choices: [{ message: { content: JSON.stringify(ideas[Math.min(log.filter(([, i]) => i.messages).length - 1, ideas.length - 1)]) } }] };
+    if (flagFirst && images++ === 0) throw new Error("AiError: 3030: Your output has been flagged.");
+    return { image: Buffer.from("PNGDATA").toString("base64") };
+  } };
+}
+
+test("/meme is admin-only, queues the job, and the next tick posts one photo", async () => {
+  env.AI = fakeAi(); env.REF_IMAGE = new Uint8Array([1, 2, 3]);
+  await say(ALICE, "/meme");
+  await bot().tick();
+  assert.equal(of("sendPhoto").length, 0);
+  await say(ADMIN, "/meme the wifi");
+  await bot().tick();
+  const [photo] = of("sendPhoto");
+  assert.equal(photo.chat_id, String(CHAT));
+  assert.equal(await photo.photo.text(), "PNGDATA");
+  assert.match(env.AI.log[0][1].messages[1].content, /the wifi/);
+  const form = await new Response(env.AI.log[1][1].multipart.body, { headers: { "content-type": env.AI.log[1][1].multipart.contentType } }).formData();
+  assert.match(form.get("prompt"), /reads "I CONTROL EVERYTHING\." .* reads "EXCEPT THE WIFI\."/);
+  assert.equal(form.get("input_image_0").size, 3);
+  await bot().tick();
+  assert.equal(of("sendPhoto").length, 1);
+});
+
+test("scheduled meme posts once per configured UTC hour", async () => {
+  env.AI = fakeAi(); env.MEME_HOURS = "10,18";
+  clock = Date.UTC(2026, 9, 6, 9, 59) / 1000;
+  await bot().tick();
+  assert.equal(of("sendPhoto").length, 0);
+  clock += 60; await bot().tick(); clock += 60; await bot().tick();
+  assert.equal(of("sendPhoto").length, 1);
+  clock += 8 * 3600; await bot().tick();
+  assert.equal(of("sendPhoto").length, 2);
+  const recent = JSON.parse(await bot().kv("meme_recent"));
+  assert.equal(recent.length, 2);
+  assert.notEqual(recent[0].topic, recent[1].topic);
+});
+
+test("a flagged image is retried; unusable or off-limits captions are never posted", async () => {
+  env.AI = fakeAi({ flagFirst: true });
+  assert.equal(await bot().postMeme(null), true);
+  assert.equal(of("sendPhoto").length, 1);
+  calls = [];
+  env.AI = fakeAi({ ideas: [{ ...IDEA, bottom: "EXCEPT THE COIN PRICE." }, { top: "x" }] });
+  await say(ADMIN, "/meme");
+  await bot().tick();
+  assert.equal(of("sendPhoto").length, 0);
+  assert.equal(env.AI.log.filter(([, i]) => i.multipart).length, 0);
+  assert.match(texts().at(-1), /jammed/);
+});
+
+test("no AI binding: memes are skipped without breaking the tick", async () => {
+  env.MEME_HOURS = "10"; clock = Date.UTC(2026, 9, 6, 10, 0) / 1000;
+  await bot().tick();
+  assert.equal(of("sendPhoto").length, 0);
 });
