@@ -8,18 +8,19 @@ machine every 5 minutes (`commander/deploy_pull.py`).
 
 | dir | bot | status |
 |-----|-----|--------|
+| `tsmom/` | Carver daily time-series momentum (IBKR paper) | launchd, daily |
 | `poc_futures/` | Prior-day POC continuation, YM+ES 5m — best-validated edge (OOS PF 1.45) | launchd, dry |
-| `sweep_futures/` | 4h liquidity-sweep reclaim, NQ+CL (swing-20, EMA-200, 1:3) | launchd, dry |
-| `tori_futures/` | 15m trendline-break (shelved after weak validation) | not running |
-| `tsmom/` | Carver daily time-series momentum | launchd, daily |
-| `momentum_shadow.py` | Long-only U.S. stock relative-momentum swing model | launchd, shadow only |
-| `crypto_scalper/` | SOL/USDT 1m VWAP+RSI+ADX scalper (Binance paper) | launchd |
-| `orb_futures/` | Opening-range breakout research — thin edge, parked | research only |
 | `commander/` | Telegram command interface + auto-deploy puller | launchd |
+| `sweep_futures/` | 4h liquidity-sweep reclaim, NQ+CL (swing-20, EMA-200, 1:3) | paused 2026-10-11 |
+| `crypto_scalper/` | SOL/USDT 1m VWAP+RSI+ADX scalper (Binance paper) | paused 2026-10-11 |
+| `tori_futures/` | 15m trendline-break (shelved after weak validation); `broker.py` is still used by TSMOM | not running |
+| `orb_futures/` | Opening-range breakout research — thin edge, parked; its data cache feeds POC backtests | research only |
+| `archive/` | Retired Alpaca ORB bot, Momentum Shadow and shelved research — see `archive/README.md` | archived |
 
-Root-level `*.py` = the original Alpaca stock bot (ORB + VWAP reversal, regime-gated).
-`momentum_shadow.py` is isolated from the Alpaca account: it maintains a virtual
-$100k ledger under `data/` and can never submit or close a broker position.
+Paused bots keep their code in place; their launchd plists sit in
+`~/Library/LaunchAgents/paused/`. Root-level `futures_risk.py`,
+`macro_calendar.py` and `shadow_results.py` are shared by the futures bots and
+the commander.
 
 ## Remote ops (from phone)
 
